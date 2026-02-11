@@ -250,17 +250,44 @@ class OccupancyGrid3DPathPlanner:
         print("Planner failed to find a solution.")
         return False
 
+    def _look_at_quat(self, from_pos: np.ndarray, to_pos: np.ndarray) -> Optional[np.ndarray]:
+        """Compute quaternion that orients from_pos to face to_pos."""
+        v = to_pos - from_pos
+        n = np.linalg.norm(v)
+        if n < 1e-8:
+            return None
+        v /= n
+        t_mat = compute_alignment_transforms(
+            origins=[from_pos],
+            align_vec=v,
+            align_axis=[1, 0, 0],
+            appr_vec=[0, 0, 1],  # CV camera convention
+            appr_axis=[0, 0, 1],
+        )[0]
+        return pose2posquat(t_mat)["quat"]
+
     def interpolate_path(
         self,
         num_interp_points: int = 1,
         external_waypoints: Optional[List[Sequence[float]]] = None,
     ) -> Optional[List[Dict[str, np.ndarray]]]:
         """
-        Build a dense, orientation-aware path. If `external_waypoints` is given, uses those.
-        Otherwise uses the OMPL solution path. Orientation is:
-          - start quat at first,
-          - goal quat at last,
-          - for intermediates: face the next waypoint.
+        Build a dense path that decouples rotation and translation.
+
+        At each waypoint the sequence is:
+          1. Rotate in place to face the next waypoint
+          2. Translate to the next waypoint (keeping orientation)
+        At the final waypoint, rotate in place to the goal orientation.
+
+        The coarse sequence looks like:
+          (start_pos, start_quat)          # arrive
+          (start_pos, look_at_wp1)         # rotate in place
+          (wp1_pos,   look_at_wp1)         # translate
+          (wp1_pos,   look_at_wp2)         # rotate in place
+          (wp2_pos,   look_at_wp2)         # translate
+          ...
+          (goal_pos,  look_at_goal)        # translate
+          (goal_pos,  goal_quat)           # rotate in place to goal orientation
         """
         try:
             if external_waypoints is None:
@@ -281,49 +308,38 @@ class OccupancyGrid3DPathPlanner:
             waypoints[0] = np.asarray(self.start_pos, dtype=float).tolist()
             waypoints[-1] = np.asarray(self.goal_pos, dtype=float).tolist()
 
-            # Build coarse (pos, quat) sequence with
+            # Build coarse sequence with decoupled rotation/translation
             coarse: List[Dict[str, np.ndarray]] = []
-            coarse.append(
-                {
-                    "pos": np.asarray(self.start_pos, dtype=float),
-                    "quat": np.asarray(self.start_quat, dtype=float),
-                }
-            )
 
-            for i in range(1, len(waypoints) - 1):
-                pos = np.asarray(waypoints[i], dtype=float)
-                prev_quat = coarse[-1]["quat"]
+            # Start: arrive with start orientation
+            start_pos = np.asarray(self.start_pos, dtype=float)
+            start_quat = np.asarray(self.start_quat, dtype=float)
+            coarse.append({"pos": start_pos, "quat": start_quat})
 
-                if i == len(waypoints) - 2:
-                    # second last: reuse previous orientation
-                    coarse.append({"pos": pos, "quat": prev_quat})
+            for i in range(len(waypoints) - 1):
+                cur_pos = np.asarray(waypoints[i], dtype=float)
+                next_pos = np.asarray(waypoints[i + 1], dtype=float)
+
+                # Compute look-at quaternion from current toward next
+                look_quat = self._look_at_quat(cur_pos, next_pos)
+                if look_quat is None:
+                    # Degenerate segment (same position), skip
                     continue
 
-                next_pos = np.asarray(waypoints[i + 1], dtype=float)
-                v = next_pos - pos
-                n = np.linalg.norm(v)
-                if n > 1e-8:
-                    v /= n
-                    # Compute alignment transform for a single origin
-                    t_mat = compute_alignment_transforms(
-                        origins=[pos],
-                        align_vec=v,
-                        align_axis=[0, 0, 1],
-                        appr_vec=[0, 0, -1],  # CV camera convention
-                        appr_axis=[0, 1, 0],
-                    )[0]
-                    quat = pose2posquat(t_mat)["quat"]
-                    coarse.append({"pos": pos, "quat": quat})
-                else:
-                    coarse.append({"pos": pos, "quat": prev_quat})
+                arriving_quat = coarse[-1]["quat"]
 
-            # Append goal
-            coarse.append(
-                {
-                    "pos": np.asarray(self.goal_pos, dtype=float),
-                    "quat": np.asarray(self.goal_quat, dtype=float),
-                }
-            )
+                # Rotate in place at current position (if orientation differs)
+                if not np.allclose(arriving_quat, look_quat, atol=1e-6):
+                    coarse.append({"pos": cur_pos.copy(), "quat": look_quat})
+
+                # Translate to next position (keeping look-at orientation)
+                coarse.append({"pos": next_pos.copy(), "quat": look_quat.copy()})
+
+            # Final rotate in place to goal orientation
+            goal_quat = np.asarray(self.goal_quat, dtype=float)
+            if not np.allclose(coarse[-1]["quat"], goal_quat, atol=1e-6):
+                goal_pos = np.asarray(self.goal_pos, dtype=float)
+                coarse.append({"pos": goal_pos, "quat": goal_quat})
 
         except Exception as e:
             print(f"No solution found: {e}")
@@ -339,7 +355,6 @@ class OccupancyGrid3DPathPlanner:
                 posquat2pose(a).reshape(1, 4, 4),
                 posquat2pose(b).reshape(1, 4, 4),
             )
-            # Extract scalar (pose_difference returns (N,M))
             td = float(np.asarray(tdiff)[0, 0])
             rd = float(np.asarray(rdiff)[0, 0])
 
@@ -351,7 +366,6 @@ class OccupancyGrid3DPathPlanner:
             if i == 0:
                 dense.extend(seg)
             else:
-                # Avoid duplicating previous endpoint
                 dense.extend(seg[1:])
 
         self.solution = dense

@@ -8,10 +8,9 @@ on ~/planned_path, and keeps it latched for path followers.
 Usage:
     python3 occ_planner_ros2.py
 
-    # Trigger from another terminal:
+    # Trigger from another terminal (only goal needed, start comes from /odom):
     ros2 service call /occ_planner/plan_path nav_msgs/srv/GetPlan \
-      "{start: {header: {frame_id: 'map'}, pose: {position: {x: 0, y: 0, z: 0}, orientation: {w: 1.0}}}, \
-        goal: {header: {frame_id: 'map'}, pose: {position: {x: 2, y: 2, z: 0}, orientation: {w: 1.0}}}}"
+      "{goal: {header: {frame_id: 'map'}, pose: {position: {x: 2, y: 2, z: 0}, orientation: {w: 1.0}}}}"
 """
 
 import numpy as np
@@ -20,8 +19,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from geometry_msgs.msg import PoseStamped, Pose
-from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseArray, PoseStamped, Pose
+from nav_msgs.msg import Odometry, Path
 from nav_msgs.srv import GetPlan
 
 from occ_planner import OccupancyGrid3DPathPlanner
@@ -62,22 +61,34 @@ class OccPlannerNode(Node):
         }
         self._planner = OccupancyGrid3DPathPlanner(params)
 
+        # Latest odom pose (updated continuously)
+        self._latest_odom_pose = None
+        self.create_subscription(Odometry, "/odom", self._odom_cb, 10)
+
         # Transient local QoS so late subscribers still get the last path
         latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._path_pub = self.create_publisher(Path, "~/planned_path", latched_qos)
+        self._waypoints_pub = self.create_publisher(PoseArray, "~/waypoints", latched_qos)
 
         # Service
         self.create_service(GetPlan, "~/plan_path", self._plan_path_cb)
 
-        self.get_logger().info("OccPlanner ready. Call ~/plan_path to plan.")
+        self.get_logger().info("OccPlanner ready. Listening on /odom. Call ~/plan_path to plan.")
+
+    def _odom_cb(self, msg: Odometry):
+        self._latest_odom_pose = msg.pose.pose
 
     def _plan_path_cb(self, request: GetPlan.Request, response: GetPlan.Response):
-        start_dict = pose_msg_to_pos_quat(request.start.pose)
+        if self._latest_odom_pose is None:
+            self.get_logger().error("No odom received yet, cannot plan")
+            return response
+
+        start_dict = pose_msg_to_pos_quat(self._latest_odom_pose)
         goal_dict = pose_msg_to_pos_quat(request.goal.pose)
         frame_id = request.goal.header.frame_id or "map"
 
         self.get_logger().info(
-            f"Planning: {start_dict['pos']} -> {goal_dict['pos']}"
+            f"Planning: {start_dict['pos']} (from odom) -> {goal_dict['pos']}"
         )
 
         if not self._planner.update_start_goal(start_dict, goal_dict):
@@ -106,6 +117,13 @@ class OccPlannerNode(Node):
 
         response.plan = path_msg
         self._path_pub.publish(path_msg)
+
+        # Publish intermediate poses as PoseArray
+        pa = PoseArray()
+        pa.header = path_msg.header
+        for wp in dense:
+            pa.poses.append(pos_quat_to_pose_msg(wp["pos"], wp["quat"]))
+        self._waypoints_pub.publish(pa)
 
         self.get_logger().info(f"Published path with {len(dense)} waypoints")
         return response
