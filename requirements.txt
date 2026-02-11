@@ -10,3 +10,4 @@ pygame==2.6.1
 rich==14.1.0
 numpy==1.26.4
 protobuf==6.32.0
+
