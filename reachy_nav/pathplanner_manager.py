@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""
+ROS2 node that publishes a TSDF scene point cloud and allows
+terminal-based object queries with pose + bounding box visualization.
+
+Usage:
+    python3 pathplanner_manager.py
+"""
+
+import os
+import gzip
+import pickle
+import threading
+
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
+
+from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs_py import point_cloud2 as pc2
+from geometry_msgs.msg import PoseStamped, Point
+from visualization_msgs.msg import Marker
+from std_msgs.msg import ColorRGBA
+
+import open3d as o3d
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(
+    THIS_DIR, "data_dso/2026_02_16-12_02_34-default_experiment"
+)
+PCD_PATH = os.path.join(DATA_DIR, "tsdf_fused.ply")
+REACHABILITY_PATH = os.path.join(DATA_DIR, "reachability.ply")
+OBJECTS_PATH = os.path.join(
+    DATA_DIR, "object_scene_graph/frame_final_objects.pkl.gz"
+)
+FRAME_ID = "map"
+MAX_ARM_REACH = 0.80  # metres from base centre
+
+
+class PathPlannerManagerNode(Node):
+    def __init__(self):
+        super().__init__("pathplanner_manager")
+
+        # --- Load TSDF point cloud ---
+        self.get_logger().info(f"Loading point cloud from {PCD_PATH}")
+        pcd = o3d.io.read_point_cloud(PCD_PATH)
+        if len(pcd.points) == 0:
+            raise RuntimeError(f"Empty point cloud: {PCD_PATH}")
+        self.get_logger().info(f"Loaded {len(pcd.points)} points")
+        self._pcd_msg = self._build_pointcloud2_msg(pcd)
+
+        # --- Load reachability map ---
+        self.get_logger().info(f"Loading reachability from {REACHABILITY_PATH}")
+        pcd_reach = o3d.io.read_point_cloud(REACHABILITY_PATH)
+        self._reachable_pts = np.asarray(pcd_reach.points)
+        self.get_logger().info(
+            f"Loaded {len(self._reachable_pts)} reachable points"
+        )
+
+        # --- Load objects (transform bbox from native to XY-ground Z-up) ---
+        self.get_logger().info(f"Loading objects from {OBJECTS_PATH}")
+        with gzip.open(OBJECTS_PATH, "rb") as f:
+            data = pickle.load(f)
+        self._objects = data["objects"]
+        for obj in self._objects:
+            bbox = np.array(obj["bbox_np"], dtype=np.float64)
+            y = bbox[:, 1].copy()
+            bbox[:, 1] = bbox[:, 2]
+            bbox[:, 2] = -y
+            obj["bbox_np"] = bbox
+        self.get_logger().info(f"Loaded {len(self._objects)} objects")
+
+        # --- Publishers ---
+        self._pcd_pub = self.create_publisher(
+            PointCloud2, "~/scene_pointcloud", 10
+        )
+
+        latched_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        self._pose_pub = self.create_publisher(
+            PoseStamped, "~/object_pose", latched_qos
+        )
+        self._bbox_pub = self.create_publisher(
+            Marker, "~/object_bbox", latched_qos
+        )
+        self._goal_pub = self.create_publisher(
+            PoseStamped, "~/nav_goal", latched_qos
+        )
+        self._reach_pub = self.create_publisher(
+            PointCloud2, "~/reachability", 10
+        )
+
+        # --- Build reachability PointCloud2 (green) ---
+        self._reach_msg = self._build_pointcloud2_msg(pcd_reach)
+
+        # --- Timer for point cloud publishing at 0.1 Hz ---
+        self.create_timer(10.0, self._publish_pointcloud)
+
+        # --- Print available objects ---
+        self._print_object_list()
+
+        # --- Start terminal query thread ---
+        self._query_thread = threading.Thread(
+            target=self._query_loop, daemon=True
+        )
+        self._query_thread.start()
+
+        self.get_logger().info("PathPlannerManager ready.")
+
+    # ------------------------------------------------------------------
+    # Point cloud
+    # ------------------------------------------------------------------
+    def _build_pointcloud2_msg(self, pcd):
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+
+        pts = np.asarray(pcd.points, dtype=np.float32)  # (N, 3)
+        if pcd.has_colors():
+            colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)  # (N, 3)
+            rgb_uint32 = (
+                colors[:, 0].astype(np.uint32) << 16
+                | colors[:, 1].astype(np.uint32) << 8
+                | colors[:, 2].astype(np.uint32)
+            )
+            rgb_float32 = rgb_uint32.view(np.float32)
+        else:
+            rgb_float32 = np.full(pts.shape[0], 0.5, dtype=np.float32)
+
+        xyzrgb = np.column_stack([pts, rgb_float32.reshape(-1, 1)])
+
+        header = self._make_header()
+        return pc2.create_cloud(header, fields, xyzrgb)
+
+    def _publish_pointcloud(self):
+        now = self.get_clock().now().to_msg()
+        self._pcd_msg.header.stamp = now
+        self._pcd_pub.publish(self._pcd_msg)
+        self._reach_msg.header.stamp = now
+        self._reach_pub.publish(self._reach_msg)
+
+    # ------------------------------------------------------------------
+    # Object pose from bounding box
+    # ------------------------------------------------------------------
+    def _compute_object_pose(self, obj):
+        bbox = obj["bbox_np"]
+        centroid = bbox.mean(axis=0)
+
+        # PCA to get oriented bounding box axes
+        vecs = bbox - centroid
+        _, _, Vt = np.linalg.svd(vecs, full_matrices=False)
+        R_mat = Vt.T
+        if np.linalg.det(R_mat) < 0:
+            R_mat[:, 2] = -R_mat[:, 2]
+        quat = R.from_matrix(R_mat).as_quat()  # [x, y, z, w]
+
+        ps = PoseStamped()
+        ps.header = self._make_header()
+        ps.pose.position.x = float(centroid[0])
+        ps.pose.position.y = float(centroid[1])
+        ps.pose.position.z = float(centroid[2])
+        ps.pose.orientation.x = float(quat[0])
+        ps.pose.orientation.y = float(quat[1])
+        ps.pose.orientation.z = float(quat[2])
+        ps.pose.orientation.w = float(quat[3])
+        return ps
+
+    # ------------------------------------------------------------------
+    # Navigation goal from reachability
+    # ------------------------------------------------------------------
+    def _compute_nav_goal(self, object_pos):
+        """Find the closest reachable point within arm reach of the object,
+        oriented with robot X facing the object.  Returns PoseStamped or None."""
+        obj_xy = object_pos[:2]
+        dists = np.linalg.norm(self._reachable_pts[:, :2] - obj_xy, axis=1)
+        within = dists <= MAX_ARM_REACH
+        if not np.any(within):
+            return None
+
+        best = np.argmin(dists[within])
+        goal_pt = self._reachable_pts[within][best]
+
+        dx = obj_xy[0] - goal_pt[0]
+        dy = obj_xy[1] - goal_pt[1]
+        yaw = np.arctan2(dy, dx)
+        quat = R.from_euler("z", yaw).as_quat()  # [x, y, z, w]
+
+        ps = PoseStamped()
+        ps.header = self._make_header()
+        ps.pose.position.x = float(goal_pt[0])
+        ps.pose.position.y = float(goal_pt[1])
+        ps.pose.position.z = float(goal_pt[2])
+        ps.pose.orientation.x = float(quat[0])
+        ps.pose.orientation.y = float(quat[1])
+        ps.pose.orientation.z = float(quat[2])
+        ps.pose.orientation.w = float(quat[3])
+        return ps
+
+    # ------------------------------------------------------------------
+    # Bounding box marker
+    # ------------------------------------------------------------------
+    def _build_bbox_marker(self, obj):
+        bbox = obj["bbox_np"]
+        centroid = bbox.mean(axis=0)
+
+        # Find 12 edges via PCA sign pattern
+        vecs = bbox - centroid
+        _, _, Vt = np.linalg.svd(vecs, full_matrices=False)
+        projs = vecs @ Vt.T
+        signs = np.sign(projs)
+
+        edges = []
+        for i in range(8):
+            for j in range(i + 1, 8):
+                if np.sum(signs[i] != signs[j]) == 1:
+                    edges.append((i, j))
+
+        marker = Marker()
+        marker.header = self._make_header()
+        marker.ns = "object_bbox"
+        marker.id = 0
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.scale.x = 0.01  # line width
+        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+        marker.pose.orientation.w = 1.0
+
+        for i, j in edges:
+            p1 = Point(
+                x=float(bbox[i, 0]),
+                y=float(bbox[i, 1]),
+                z=float(bbox[i, 2]),
+            )
+            p2 = Point(
+                x=float(bbox[j, 0]),
+                y=float(bbox[j, 1]),
+                z=float(bbox[j, 2]),
+            )
+            marker.points.append(p1)
+            marker.points.append(p2)
+
+        return marker
+
+    # ------------------------------------------------------------------
+    # Terminal query loop
+    # ------------------------------------------------------------------
+    def _query_loop(self):
+        while rclpy.ok():
+            try:
+                query = input(
+                    "\nEnter object name (or 'list' to show all): "
+                ).strip()
+            except EOFError:
+                break
+
+            if not query:
+                continue
+
+            if query.lower() == "list":
+                self._print_object_list()
+                continue
+
+            # Case-insensitive partial match
+            matches = [
+                obj
+                for obj in self._objects
+                if query.lower() in obj["name"].lower()
+            ]
+
+            if len(matches) == 0:
+                print(f"  No objects matching '{query}'")
+                continue
+
+            if len(matches) == 1:
+                selected = matches[0]
+            else:
+                print(f"  Found {len(matches)} matches:")
+                for idx, obj in enumerate(matches):
+                    c = obj["bbox_np"].mean(axis=0)
+                    print(
+                        f"    [{idx}] {obj['name']} "
+                        f"(detections={obj['num_detections']}, "
+                        f"pos=[{c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}])"
+                    )
+                try:
+                    choice = input(
+                        "  Pick index (or Enter for first): "
+                    ).strip()
+                    if choice == "":
+                        selected = matches[0]
+                    else:
+                        selected = matches[int(choice)]
+                except (ValueError, IndexError, EOFError):
+                    print("  Invalid selection.")
+                    continue
+
+            self._publish_object(selected)
+
+    def _publish_object(self, obj):
+        centroid = obj["bbox_np"].mean(axis=0)
+        self.get_logger().info(
+            f"Publishing '{obj['name']}' at "
+            f"[{centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}]"
+        )
+        self._pose_pub.publish(self._compute_object_pose(obj))
+        self._bbox_pub.publish(self._build_bbox_marker(obj))
+        print(f"  -> Published pose on ~/object_pose")
+        print(f"  -> Published bbox on ~/object_bbox")
+
+        goal = self._compute_nav_goal(centroid)
+        if goal is not None:
+            self._goal_pub.publish(goal)
+            p = goal.pose.position
+            yaw = R.from_quat([
+                goal.pose.orientation.x, goal.pose.orientation.y,
+                goal.pose.orientation.z, goal.pose.orientation.w,
+            ]).as_euler("xyz")[2]
+            print(
+                f"  -> Nav goal: [{p.x:.3f}, {p.y:.3f}, {p.z:.3f}] "
+                f"yaw={np.degrees(yaw):.1f}° on ~/nav_goal"
+            )
+        else:
+            print(
+                f"  ** No reachable point within {MAX_ARM_REACH}m of object"
+            )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _make_header(self):
+        from std_msgs.msg import Header
+
+        h = Header()
+        h.frame_id = FRAME_ID
+        h.stamp = self.get_clock().now().to_msg()
+        return h
+
+    def _print_object_list(self):
+        print("\n--- Available objects ---")
+        for idx, obj in enumerate(self._objects):
+            c = obj["bbox_np"].mean(axis=0)
+            print(
+                f"  [{idx:3d}] {obj['name']:25s} "
+                f"detections={obj['num_detections']:3d}  "
+                f"pos=[{c[0]:+.2f}, {c[1]:+.2f}, {c[2]:+.2f}]"
+            )
+        print(f"--- Total: {len(self._objects)} objects ---\n")
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PathPlannerManagerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
