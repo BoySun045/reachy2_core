@@ -4,9 +4,9 @@ ROS2 node wrapping the path planner from path_planner_o3d.py.
 
 - Loads the TSDF scene and sets up the collision checker once at startup.
 - Subscribes to the nav goal from pathplanner_manager (PoseStamped).
+- Subscribes to the live robot pose from the localization node.
 - On each goal: solves, assigns look-at orientations, publishes the
   trajectory as nav_msgs/Path.
-- Start pose is hardcoded until the localisation pipeline is ready.
 
 Usage:
     python3 path_planner_node.py
@@ -50,14 +50,18 @@ from path_planner_o3d import (
 
 FRAME_ID = "map"
 
-# Hardcoded start until localisation is ready
-START_POS = np.array([0.0, 0.0, 0.0], dtype=float)
-START_YAW = np.pi / 2
+# Fallback start pose (used when no live localization is available)
+START_POS_FALLBACK = np.array([0.0, 0.0, 0.0], dtype=float)
+START_YAW_FALLBACK = -np.pi / 2
 
 
 class PathPlannerNode(Node):
     def __init__(self):
         super().__init__("path_planner")
+
+        # ---- Live pose from localization node ----
+        self._current_pos = None  # np.array([x, y, z]) in z-up frame
+        self._current_yaw = None  # float, radians
 
         # ---- Load scene & build planner (once) ----
         self.get_logger().info(f"Loading point cloud: {PCD_PATH}")
@@ -114,7 +118,34 @@ class PathPlannerNode(Node):
             latched_qos,
         )
 
+        # ---- Subscriber: live robot pose from localization node ----
+        self.create_subscription(
+            PoseStamped,
+            "/localization/robot_pose",
+            self._on_robot_pose,
+            latched_qos,
+        )
+
         self.get_logger().info("PathPlanner node ready, waiting for goals...")
+
+    # ------------------------------------------------------------------
+    def _on_robot_pose(self, msg: PoseStamped):
+        self._current_pos = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+        ])
+        self._current_yaw = quat_to_yaw(np.array([
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w,
+        ]))
+        self.get_logger().info(
+            f"Robot pose updated: [{self._current_pos[0]:.3f}, "
+            f"{self._current_pos[1]:.3f}] yaw={np.degrees(self._current_yaw):.1f}°",
+            throttle_duration_sec=5.0,
+        )
 
     # ------------------------------------------------------------------
     def _on_goal(self, msg: PoseStamped):
@@ -136,8 +167,18 @@ class PathPlannerNode(Node):
             f"{goal_pos[2]:.3f}] yaw={np.degrees(goal_yaw):.1f}°"
         )
 
+        # ---- Determine start pose ----
+        if self._current_pos is not None:
+            start_pos = self._current_pos
+            start_yaw = self._current_yaw
+            self.get_logger().info("Using live localized pose as start")
+        else:
+            start_pos = START_POS_FALLBACK
+            start_yaw = START_YAW_FALLBACK
+            self.get_logger().warn("No live pose, using fallback start")
+
         # ---- Solve ----
-        start_xz = force_z(START_POS, Z_PLANE)
+        start_xz = force_z(start_pos, Z_PLANE)
         goal_xz = force_z(goal_pos, Z_PLANE)
 
         start_ok = self._planner.isStateValid_poly_stack(start_xz)
@@ -149,7 +190,7 @@ class PathPlannerNode(Node):
         if not start_ok or not goal_ok:
             self.get_logger().warn("Start or goal is in collision, solving anyway...")
 
-        start = {"pos": start_xz, "quat": yaw_to_quat(START_YAW)}
+        start = {"pos": start_xz, "quat": yaw_to_quat(start_yaw)}
         goal = {"pos": goal_xz, "quat": goal_quat}
         self._planner.update_start_goal(start, goal)
 
@@ -163,7 +204,7 @@ class PathPlannerNode(Node):
         # Clamp Z & assign orientations
         for sol in solution:
             sol["pos"][2] = Z_PLANE
-        solution = assign_look_at_orientations(solution, START_YAW, goal_yaw)
+        solution = assign_look_at_orientations(solution, start_yaw, goal_yaw)
 
         self.get_logger().info(f"Solution: {len(solution)} waypoints")
         for i, s in enumerate(solution):
