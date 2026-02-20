@@ -9,18 +9,17 @@ from tqdm import tqdm
 # User config
 # ----------------------------
 DATA_DIR = os.path.join(os.path.dirname(__file__),
-                        "data_dso/2026_02_16-12_02_34-default_experiment")
+                        "data_dso/2026_02_20-14_50_41-default_experiment")
 RGB_DIR = os.path.join(DATA_DIR, "rgb")
 DEPTH_DIR = os.path.join(DATA_DIR, "depth")
 POSE_DIR = os.path.join(DATA_DIR, "camera_poses")
 INTRINSIC_DIR = os.path.join(DATA_DIR, "camera_intrinsics")
-EXTRINSIC_TXT = os.path.join(DATA_DIR, "camera_extrinsics.txt")
 
 DEPTH_SCALE = 1000.0
 DEPTH_TRUNC = 3
 
-VOXEL_LENGTH = 0.01
-SDF_TRUNC = 0.01
+VOXEL_LENGTH = 0.02
+SDF_TRUNC = 0.05
 
 STAT_NB_NEIGHBORS = 20
 STAT_STD_RATIO = 2.0

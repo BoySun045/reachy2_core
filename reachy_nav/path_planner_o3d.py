@@ -53,7 +53,7 @@ BOUND_MARGIN = 0.5
 CROP_VERT = None  # e.g. (0.0, 2.0) in Z values
 
 # ---- Planar motion constraints ----
-Z_PLANE = 0.50      # ground-plane height (Z+ is up); tune to your map
+Z_PLANE = 0.58      # ground-plane height (Z+ is up); tune to your map
 Z_BOUND_EPS = 1e-3  # planner bounds tightness on vertical axis
 
 # Start / Goal in [X, Y, Z] — Z component is overridden to Z_PLANE
@@ -90,7 +90,7 @@ VERT_STEP = 0.10  # try 0.15 if too slow
 
 # Collision checker params
 POLY_VERT_BAND = 0.30   # obstacle slab thickness per slice
-POLY_MARGIN = 0.05      # safety margin around polygon edges 0.05
+POLY_MARGIN = 0.00      # safety margin around polygon edges 0.05
 
 # OPTIONAL: remove floor voxels
 ENABLE_FLOOR_CUT = False

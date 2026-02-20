@@ -21,7 +21,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 
 import open3d as o3d
 
@@ -120,26 +120,27 @@ class PathPlannerNode(Node):
 
         # ---- Subscriber: live robot pose from localization node ----
         self.create_subscription(
-            PoseStamped,
-            "/localization/robot_pose",
+            Odometry,
+            "/slam/base_odom",
             self._on_robot_pose,
-            latched_qos,
+            10,
         )
 
         self.get_logger().info("PathPlanner node ready, waiting for goals...")
 
     # ------------------------------------------------------------------
-    def _on_robot_pose(self, msg: PoseStamped):
+    def _on_robot_pose(self, msg: Odometry):
+        pose = msg.pose.pose
         self._current_pos = np.array([
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
+            pose.position.x,
+            pose.position.y,
+            pose.position.z,
         ])
         self._current_yaw = quat_to_yaw(np.array([
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
         ]))
         self.get_logger().info(
             f"Robot pose updated: [{self._current_pos[0]:.3f}, "

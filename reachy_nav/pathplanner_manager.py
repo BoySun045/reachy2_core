@@ -10,6 +10,8 @@ Usage:
 import os
 import gzip
 import pickle
+import random
+import re
 import threading
 
 import numpy as np
@@ -23,7 +25,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
 from geometry_msgs.msg import PoseStamped, Point
 from visualization_msgs.msg import Marker
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, String
 
 import open3d as o3d
 
@@ -99,6 +101,11 @@ class PathPlannerManagerNode(Node):
 
         # --- Timer for point cloud publishing at 0.1 Hz ---
         self.create_timer(10.0, self._publish_pointcloud)
+
+        # --- Subscriber for LLM-routed queries ---
+        self.create_subscription(
+            String, '~/query', self._on_query, 10
+        )
 
         # --- Print available objects ---
         self._print_object_list()
@@ -247,6 +254,67 @@ class PathPlannerManagerNode(Node):
             marker.points.append(p2)
 
         return marker
+
+    # ------------------------------------------------------------------
+    # Object query (shared by terminal and ROS subscriber)
+    # ------------------------------------------------------------------
+    def _find_and_publish_object(self, query: str) -> bool:
+        """Find an object by partial name match and publish pose + nav goal.
+
+        If query ends with a number (e.g. "robot dog 2"), selects that
+        specific instance (1-indexed).  Otherwise picks randomly.
+        Returns True if an object was found and published.
+        """
+        # Check for trailing index: "robot dog 2" → name="robot dog", idx=2
+        m = re.match(r'^(.+?)\s+(\d+)$', query.strip())
+        if m:
+            name_part = m.group(1)
+            requested_idx = int(m.group(2))
+        else:
+            name_part = query.strip()
+            requested_idx = None
+
+        matches = [
+            obj
+            for obj in self._objects
+            if name_part.lower() in obj["name"].lower()
+        ]
+
+        if not matches:
+            self.get_logger().warn(f"No objects matching '{name_part}'")
+            return False
+
+        if requested_idx is not None:
+            if requested_idx < 1 or requested_idx > len(matches):
+                self.get_logger().warn(
+                    f"Index {requested_idx} out of range "
+                    f"(have {len(matches)} '{name_part}' objects)"
+                )
+                return False
+            selected = matches[requested_idx - 1]
+            self.get_logger().info(
+                f"Selected '{selected['name']}' #{requested_idx} "
+                f"of {len(matches)}"
+            )
+        elif len(matches) > 1:
+            selected = random.choice(matches)
+            self.get_logger().info(
+                f"Found {len(matches)} '{name_part}' objects, "
+                f"randomly selected '{selected['name']}'"
+            )
+        else:
+            selected = matches[0]
+
+        self._publish_object(selected)
+        return True
+
+    def _on_query(self, msg):
+        """Handle object query from LLM command router."""
+        query = msg.data.strip()
+        if not query:
+            return
+        self.get_logger().info(f"Received query from LLM: '{query}'")
+        self._find_and_publish_object(query)
 
     # ------------------------------------------------------------------
     # Terminal query loop
