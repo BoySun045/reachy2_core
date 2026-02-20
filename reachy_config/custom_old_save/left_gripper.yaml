@@ -1,3 +1,0 @@
-io: !DynamixelSerialIO
-  serial_port_name: /dev/left_grippers
-  id: 53
