@@ -1,7 +1,7 @@
 import os
-import sys
 import re
 import glob
+import argparse
 import numpy as np
 import open3d as o3d
 from tqdm import tqdm
@@ -94,7 +94,7 @@ def make_trajectory_line(points_xyz: np.ndarray) -> o3d.geometry.LineSet:
 # ----------------------------
 # Main
 # ----------------------------
-def run_tsdf_fusion(data_dir: str):
+def run_tsdf_fusion(data_dir: str, z_up: bool = False):
     rgb_dir = os.path.join(data_dir, "rgb")
     depth_dir = os.path.join(data_dir, "depth")
     pose_dir = os.path.join(data_dir, "camera_poses")
@@ -202,15 +202,17 @@ def run_tsdf_fusion(data_dir: str):
     print(f"Statistical outlier removal: {n_before} → {len(pcd.points)} points ({n_before - len(pcd.points)} removed)")
 
     # Convert to XY-ground, Z-up frame before saving
-    pcd.points = o3d.utility.Vector3dVector(to_z_up(np.asarray(pcd.points)))
+    if z_up:
+        pcd.points = o3d.utility.Vector3dVector(to_z_up(np.asarray(pcd.points)))
     pcd_path = os.path.join(data_dir, "tsdf_fused.ply")
     o3d.io.write_point_cloud(pcd_path, pcd)
     print(f"Saved point cloud: {pcd_path}")
 
     mesh = volume.extract_triangle_mesh()
     mesh.compute_vertex_normals()
-    mesh.vertices = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertices)))
-    mesh.vertex_normals = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertex_normals)))
+    if z_up:
+        mesh.vertices = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertices)))
+        mesh.vertex_normals = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertex_normals)))
     mesh_path = os.path.join(data_dir, "tsdf_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_path, mesh)
     print(f"Saved mesh: {mesh_path}")
@@ -218,12 +220,15 @@ def run_tsdf_fusion(data_dir: str):
     # Visualize: cloud + trajectory + frustums
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
 
-    cam_positions_np = to_z_up(np.array(cam_positions)) if cam_positions else np.zeros((0, 3))
+    cam_positions_np = np.array(cam_positions) if cam_positions else np.zeros((0, 3))
+    if z_up:
+        cam_positions_np = to_z_up(cam_positions_np)
     traj = make_trajectory_line(cam_positions_np)
 
     # Transform frustum line-sets to Z-up
-    for f in cam_frustums:
-        f.points = o3d.utility.Vector3dVector(to_z_up(np.asarray(f.points)))
+    if z_up:
+        for f in cam_frustums:
+            f.points = o3d.utility.Vector3dVector(to_z_up(np.asarray(f.points)))
 
     geoms = [pcd, world_frame, traj] + cam_frustums
     o3d.visualization.draw_geometries(geoms)
@@ -241,7 +246,9 @@ def run_tsdf_fusion(data_dir: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: python3 {sys.argv[0]} <path/to/data_dir/>")
-        sys.exit(1)
-    run_tsdf_fusion(sys.argv[1])
+    parser = argparse.ArgumentParser(description="TSDF fusion from RGB-D + poses")
+    parser.add_argument("data_dir", help="Path to data directory")
+    parser.add_argument("--z-up", action="store_true",
+                        help="Convert to Z-up coordinate frame (default is Y-up)")
+    args = parser.parse_args()
+    run_tsdf_fusion(args.data_dir, z_up=args.z_up)

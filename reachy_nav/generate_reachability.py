@@ -241,9 +241,10 @@ def main(pcd_path: str):
     # ---- Visualize ----
     pcd_scene = o3d.io.read_point_cloud(pcd_path)
     pcd_scene = pcd_scene.voxel_down_sample(voxel_size=0.02)
+    origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
 
     o3d.visualization.draw_geometries(
-        [pcd_scene, pcd_reach],
+        [pcd_scene, pcd_reach, origin],
         window_name="Reachability (green) + Scene",
         point_show_normal=False,
     )
