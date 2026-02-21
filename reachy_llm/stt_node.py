@@ -4,19 +4,28 @@ Uses energy-based voice activity detection to automatically detect speech
 from a microphone with a hardware mute button.  When audio energy rises
 above a threshold the node starts recording; when silence is detected for
 a configurable duration it stops, transcribes with Whisper, parses with
-Ollama, and routes the command to the appropriate subsystem:
+Ollama, and routes the command to the appropriate robot subsystem.
+
+Multi-robot support: commands are prefixed with a robot name (reachy / spot).
+The robot field is passed along in the routed message so each manager can
+decide which robot-specific topics / actions to use.
+
+Routing topics (same regardless of robot):
   - navigation  → /pathplanner_manager/query
   - manipulation → /vidbot/trigger
   - locomotion   → /locomotion/command
+  - service      → direct ROS2 service calls (e.g. /spot/stand, /spot/sit)
 """
 
 import json
+import threading
 import time
 import wave
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from audio_capture import AudioCapture
 from transcriber import Transcriber
@@ -53,13 +62,24 @@ class SpeechToTextNode(Node):
         self._pub = self.create_publisher(String, 'transcription', 10)
         self._cmd_pub = self.create_publisher(String, 'command', 10)
 
-        # Routing publishers
+        # Routing publishers (same topics for all robots — robot field in message)
         self._nav_pub = self.create_publisher(
             String, '/pathplanner_manager/query', 10)
         self._manip_pub = self.create_publisher(
             String, '/vidbot/trigger', 10)
         self._loco_pub = self.create_publisher(
             String, '/locomotion/command', 10)
+
+        # Spot service clients (all std_srvs/Trigger)
+        # "kill" is a special sequence: sit then rollover.
+        self._spot_services = {}
+        for svc_name in ('stand', 'sit', 'arm_stow', 'arm_unstow',
+                         'open_gripper', 'close_gripper',
+                         'claim', 'power_on', 'power_off', 'rollover'):
+            topic = f'/spot/{svc_name}'
+            self._spot_services[svc_name] = self.create_client(
+                Trigger, topic)
+        self._spot_service_busy = False
 
         # Audio
         self.get_logger().info('Initializing microphone...')
@@ -157,16 +177,19 @@ class SpeechToTextNode(Node):
             if parsed:
                 cmd_msg = String()
                 cmd_msg.data = json.dumps({
+                    'robot': parsed.robot,
                     'category': parsed.category,
                     'object': parsed.object,
                     'instruction': parsed.instruction,
+                    'service': parsed.service,
                     'dx': parsed.dx,
                     'dy': parsed.dy,
                     'dyaw': parsed.dyaw,
                 })
                 self._cmd_pub.publish(cmd_msg)
                 self.get_logger().info(
-                    f'[{parsed.category}] object="{parsed.object}", '
+                    f'[{parsed.robot}/{parsed.category}] '
+                    f'object="{parsed.object}", '
                     f'instruction="{parsed.instruction}"'
                 )
                 self._route_command(parsed)
@@ -178,34 +201,91 @@ class SpeechToTextNode(Node):
         self._state = _IDLE
 
     def _route_command(self, parsed):
+        robot = parsed.robot
         msg = String()
 
         if parsed.category == 'navigation':
-            msg.data = parsed.object
+            msg.data = json.dumps({
+                'robot': robot,
+                'object': parsed.object,
+            })
             self._nav_pub.publish(msg)
             self.get_logger().info(
-                f'Routed to navigation: query="{parsed.object}"')
+                f'Routed to navigation: robot={robot}, '
+                f'query="{parsed.object}"')
 
         elif parsed.category == 'manipulation':
             msg.data = json.dumps({
+                'robot': robot,
                 'object': parsed.object,
                 'instruction': parsed.instruction,
             })
             self._manip_pub.publish(msg)
             self.get_logger().info(
-                f'Routed to manipulation: object="{parsed.object}", '
+                f'Routed to manipulation: robot={robot}, '
+                f'object="{parsed.object}", '
                 f'instruction="{parsed.instruction}"')
 
         elif parsed.category == 'locomotion':
             msg.data = json.dumps({
+                'robot': robot,
                 'dx': parsed.dx,
                 'dy': parsed.dy,
                 'dyaw': parsed.dyaw_rad,
             })
             self._loco_pub.publish(msg)
             self.get_logger().info(
-                f'Routed to locomotion: dx={parsed.dx}, dy={parsed.dy}, '
-                f'dyaw={parsed.dyaw}deg')
+                f'Routed to locomotion: robot={robot}, dx={parsed.dx}, '
+                f'dy={parsed.dy}, dyaw={parsed.dyaw}deg')
+
+        elif parsed.category == 'service':
+            self.get_logger().info(
+                f'Routed to service: robot={robot}, '
+                f'service="{parsed.service}"')
+            threading.Thread(
+                target=self._call_spot_service,
+                args=(parsed.service,),
+                daemon=True,
+            ).start()
+
+    # ------------------------------------------------------------------
+    # Spot service calls
+    # ------------------------------------------------------------------
+    def _call_spot_service(self, service_name: str):
+        if self._spot_service_busy:
+            self.get_logger().warn(
+                'Spot service call already in progress, ignoring')
+            return
+        self._spot_service_busy = True
+        try:
+            if service_name == 'kill':
+                # Kill sequence: sit first, then rollover
+                self._call_single_service('sit')
+                self._call_single_service('rollover')
+            else:
+                self._call_single_service(service_name)
+        finally:
+            self._spot_service_busy = False
+
+    def _call_single_service(self, name: str):
+        client = self._spot_services.get(name)
+        if client is None:
+            self.get_logger().error(f'No service client for "{name}"')
+            return
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error(
+                f'Service /spot/{name} not available')
+            return
+        future = client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        if future.result() is not None:
+            result = future.result()
+            self.get_logger().info(
+                f'/spot/{name}: success={result.success}, '
+                f'message="{result.message}"')
+        else:
+            self.get_logger().error(
+                f'/spot/{name} call failed')
 
     def destroy_node(self):
         if self._audio.is_recording:

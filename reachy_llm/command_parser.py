@@ -20,10 +20,41 @@ log = logging.getLogger(__name__)
 _DIRECTIONS = {'forward', 'forwards', 'backward', 'backwards', 'back',
                'left', 'right', 'sideways'}
 
+# Known robot names
+_ROBOTS = {'reachy', 'spot'}
+_DEFAULT_ROBOT = 'reachy'
+
+# Whisper often mishears "reachy" as these variants
+_REACHY_ALIASES = re.compile(
+    r'reachy|richie|ritchie|reachie|reechy|richi|reachi|richy|reachy', re.I)
+_SPOT_ALIASES = re.compile(r'spot', re.I)
+
+# Robot name prefix: "reachy, go to ..." / "spot go forward" / "tell reachy to ..."
+_ROBOT_PREFIX_RE = re.compile(
+    r'^(?:tell\s+)?'
+    r'(reachy|richie|ritchie|reachie|reechy|richi|reachi|richy|spot)'
+    r'[,:]?\s+(?:to\s+)?', re.I)
+
 # Filler words/phrases Whisper commonly adds
+# NOTE: "reachy" removed — it is now a meaningful robot identifier
 _FILLER_RE = re.compile(
     r'\b(please|can you|could you|would you|i want you to|i need you to'
-    r'|go ahead and|just|okay|hey|robot|reachy)\b', re.I)
+    r'|go ahead and|just|okay|hey|robot)\b', re.I)
+
+# --- Spot service commands: maps regex → canonical service name ---
+# Checked after robot extraction; only fires when robot == "spot".
+_SPOT_SERVICE_RULES = [
+    (re.compile(r'^(?:stand(?:\s+up)?|get\s+up|rise)$', re.I),         'stand'),
+    (re.compile(r'^(?:sit(?:\s+down)?|lie\s+down|lay\s+down)$', re.I), 'sit'),
+    (re.compile(r'^(?:stow(?:\s+(?:the\s+)?arm)?|put\s+(?:the\s+)?arm\s+(?:away|back))$', re.I),   'arm_stow'),
+    (re.compile(r'^(?:unstow(?:\s+(?:the\s+)?arm)?|deploy\s+(?:the\s+)?arm|bring\s+(?:the\s+)?arm\s+out)$', re.I), 'arm_unstow'),
+    (re.compile(r'^open\s+(?:the\s+)?(?:gripper|hand|claw)$', re.I),   'open_gripper'),
+    (re.compile(r'^close\s+(?:the\s+)?(?:gripper|hand|claw)$', re.I),  'close_gripper'),
+    (re.compile(r'^(?:claim|claim\s+(?:the\s+)?robot)$', re.I),        'claim'),
+    (re.compile(r'^(?:power\s+on|power\s+up|boot(?:\s+up)?)$', re.I),  'power_on'),
+    (re.compile(r'^(?:power\s+off|shut\s*down)$', re.I),               'power_off'),
+    (re.compile(r'^(?:kill|roll\s*over|emergency(?:\s+stop)?)$', re.I), 'kill'),
+]
 
 # --- Stop / halt / freeze ---
 _STOP_RE = re.compile(
@@ -65,18 +96,30 @@ _MANIP_RE = re.compile(
 
 SYSTEM_PROMPT = """You parse spoken robot commands into structured JSON.
 
+There are two robots: "reachy" and "spot". The user will address one by name.
+If no robot is mentioned, default to "reachy".
+Note: speech recognition may mishear "reachy" as "richie", "ritchie", "reachie",
+"reechy", "richi", or "richy". All of these refer to the robot "reachy".
+
 Return a JSON object with these fields:
-- "category": one of "navigation", "manipulation", or "locomotion"
-- "object": the physical thing being acted on (no articles). Empty string for locomotion.
+- "robot": "reachy" or "spot"
+- "category": one of "navigation", "manipulation", "locomotion", or "service"
+- "object": the physical thing being acted on (no articles). Empty string for locomotion/service.
 - "instruction": the action to perform (verb + modifiers, no filler)
+- "service": canonical service name (only for category="service", empty string otherwise)
 - "dx": forward displacement in metres (only for locomotion, 0.0 otherwise)
 - "dy": leftward displacement in metres (only for locomotion, 0.0 otherwise)
 - "dyaw": counter-clockwise rotation in degrees (only for locomotion, 0.0 otherwise)
 
 Category rules:
-- "navigation": the robot should move its base to reach a named object or location (e.g. "go to the bottle", "navigate to the table")
-- "manipulation": the robot should use its arm to interact with an object (e.g. "pick up the cup", "grab the ball", "put the box on the shelf", "press the button")
-- "locomotion": the robot should move its base by a relative amount without a target object (e.g. "move left 10cm", "go forward 50cm", "turn right 90 degrees")
+- "navigation": the robot should move its base to reach a named object or location
+- "manipulation": the robot should use its arm to interact with an object
+- "locomotion": the robot should move its base by a relative amount without a target object
+- "service": a direct body/state command for Spot (stand, sit, stow arm, etc.)
+
+Valid service names for Spot:
+  "stand", "sit", "arm_stow", "arm_unstow", "open_gripper", "close_gripper",
+  "claim", "power_on", "power_off", "kill"
 
 For locomotion, convert distances to metres and directions to the robot body frame:
 - forward = +dx, backward = -dx
@@ -84,48 +127,59 @@ For locomotion, convert distances to metres and directions to the robot body fra
 - turn left = +dyaw, turn right = -dyaw
 
 Examples:
-User: "go to the bottle"
-{"category": "navigation", "object": "bottle", "instruction": "go to", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+User: "reachy go to the bottle"
+{"robot": "reachy", "category": "navigation", "object": "bottle", "instruction": "go to", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "pick up the red cup"
-{"category": "manipulation", "object": "red cup", "instruction": "pick up", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+User: "spot, pick up the red cup"
+{"robot": "spot", "category": "manipulation", "object": "red cup", "instruction": "pick up", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "grab the ball from the table"
-{"category": "manipulation", "object": "ball", "instruction": "grab from the table", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+User: "tell reachy to grab the ball from the table"
+{"robot": "reachy", "category": "manipulation", "object": "ball", "instruction": "grab from the table", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "navigate to the chair"
-{"category": "navigation", "object": "chair", "instruction": "navigate to", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+User: "spot navigate to the chair"
+{"robot": "spot", "category": "navigation", "object": "chair", "instruction": "navigate to", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "move forward 50 centimeters"
-{"category": "locomotion", "object": "", "instruction": "move forward 50cm", "dx": 0.5, "dy": 0.0, "dyaw": 0.0}
+User: "reachy move forward 50 centimeters"
+{"robot": "reachy", "category": "locomotion", "object": "", "instruction": "move forward 50cm", "service": "", "dx": 0.5, "dy": 0.0, "dyaw": 0.0}
 
-User: "go left by 10 centimeters"
-{"category": "locomotion", "object": "", "instruction": "move left 10cm", "dx": 0.0, "dy": 0.1, "dyaw": 0.0}
+User: "spot stand"
+{"robot": "spot", "category": "service", "object": "", "instruction": "stand", "service": "stand", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "move to the right 30 centimeters"
-{"category": "locomotion", "object": "", "instruction": "move right 30cm", "dx": 0.0, "dy": -0.3, "dyaw": 0.0}
+User: "spot sit down"
+{"robot": "spot", "category": "service", "object": "", "instruction": "sit", "service": "sit", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "turn left 90 degrees"
-{"category": "locomotion", "object": "", "instruction": "turn left 90 degrees", "dx": 0.0, "dy": 0.0, "dyaw": 90.0}
+User: "spot stow the arm"
+{"robot": "spot", "category": "service", "object": "", "instruction": "stow arm", "service": "arm_stow", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "rotate right 45 degrees"
-{"category": "locomotion", "object": "", "instruction": "turn right 45 degrees", "dx": 0.0, "dy": 0.0, "dyaw": -45.0}
+User: "spot unstow arm"
+{"robot": "spot", "category": "service", "object": "", "instruction": "unstow arm", "service": "arm_unstow", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
-User: "go back 20 centimeters"
-{"category": "locomotion", "object": "", "instruction": "move backward 20cm", "dx": -0.2, "dy": 0.0, "dyaw": 0.0}
+User: "spot open gripper"
+{"robot": "spot", "category": "service", "object": "", "instruction": "open gripper", "service": "open_gripper", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "spot close gripper"
+{"robot": "spot", "category": "service", "object": "", "instruction": "close gripper", "service": "close_gripper", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "spot power on"
+{"robot": "spot", "category": "service", "object": "", "instruction": "power on", "service": "power_on", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "spot kill"
+{"robot": "spot", "category": "service", "object": "", "instruction": "kill", "service": "kill", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "go to the table"
+{"robot": "reachy", "category": "navigation", "object": "table", "instruction": "go to", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
 User: "put the bottle on the shelf"
-{"category": "manipulation", "object": "bottle", "instruction": "put on the shelf", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
-
-User: "press the light switch"
-{"category": "manipulation", "object": "light switch", "instruction": "press", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}"""
+{"robot": "reachy", "category": "manipulation", "object": "bottle", "instruction": "put on the shelf", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}"""
 
 
 @dataclass
 class ParsedCommand:
-    category: str  # "navigation", "manipulation", or "locomotion"
+    category: str  # "navigation", "manipulation", "locomotion", or "service"
     object: str
     instruction: str
+    robot: str = _DEFAULT_ROBOT  # "reachy" or "spot"
+    service: str = ''  # canonical service name (only for category="service")
     dx: float = 0.0
     dy: float = 0.0
     dyaw: float = 0.0  # degrees from LLM, converted to radians in property
@@ -148,10 +202,35 @@ class CommandParser:
     # ------------------------------------------------------------------ #
     #  Rule-based (instant)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_robot(name: str) -> str:
+        """Map Whisper misheard variants to canonical robot name."""
+        if _REACHY_ALIASES.fullmatch(name):
+            return 'reachy'
+        if _SPOT_ALIASES.fullmatch(name):
+            return 'spot'
+        return _DEFAULT_ROBOT
+
+    @staticmethod
+    def _extract_robot(text: str) -> tuple[str, str]:
+        """Extract robot name from the beginning of the command.
+
+        Returns (canonical_robot_name, remaining_text).
+        """
+        m = _ROBOT_PREFIX_RE.match(text)
+        if m:
+            robot = CommandParser._normalize_robot(m.group(1))
+            return robot, text[m.end():].strip()
+        return _DEFAULT_ROBOT, text
+
     def _try_rules(self, text: str) -> Optional[ParsedCommand]:
         t = text.strip()
         # Strip trailing punctuation (Whisper often adds periods)
         t = t.rstrip('.,!?;:')
+
+        # Extract robot name before stripping filler
+        robot, t = self._extract_robot(t)
+
         # Strip filler words/phrases
         t = _FILLER_RE.sub('', t).strip()
         t = re.sub(r'\s+', ' ', t)
@@ -159,9 +238,16 @@ class CommandParser:
         if not t:
             return None
 
+        # --- Spot service commands (checked first — "stand", "sit", etc.) ---
+        if robot == 'spot':
+            for pattern, svc_name in _SPOT_SERVICE_RULES:
+                if pattern.match(t):
+                    return ParsedCommand('service', '', svc_name,
+                                         robot=robot, service=svc_name)
+
         # --- Stop / halt / freeze ---
         if _STOP_RE.match(t):
-            return ParsedCommand('locomotion', '', 'stop')
+            return ParsedCommand('locomotion', '', 'stop', robot=robot)
 
         # --- Turn / rotate / spin ---
         m = _TURN_RE.search(t)
@@ -170,12 +256,14 @@ class CommandParser:
             angle = float(m.group(2)) if m.group(2) else 90.0
             dyaw = angle if direction == 'left' else -angle
             return ParsedCommand('locomotion', '',
-                                 f'turn {direction} {angle} degrees', dyaw=dyaw)
+                                 f'turn {direction} {angle} degrees',
+                                 robot=robot, dyaw=dyaw)
 
         # --- Move / turn around (180 deg) ---
         if _AROUND_RE.search(t):
             return ParsedCommand('locomotion', '',
-                                 'turn around 180 degrees', dyaw=180.0)
+                                 'turn around 180 degrees',
+                                 robot=robot, dyaw=180.0)
 
         # --- Move/go/shift/step any direction [distance] ---
         m = _MOVE_DIR_RE.search(t)
@@ -195,7 +283,8 @@ class CommandParser:
             elif direction == 'right':
                 dy = -dist_val
             return ParsedCommand('locomotion', '',
-                                 f'move {direction}', dx=dx, dy=dy)
+                                 f'move {direction}',
+                                 robot=robot, dx=dx, dy=dy)
 
         # --- Manipulation (check before navigation so "take the bottle"
         #     doesn't match "take me to") ---
@@ -207,7 +296,8 @@ class CommandParser:
             if re.match(r'me\s+to\b', obj, re.I):
                 pass  # fall through to navigation
             else:
-                return ParsedCommand('manipulation', obj, f'{action} {obj}')
+                return ParsedCommand('manipulation', obj, f'{action} {obj}',
+                                     robot=robot)
 
         # --- Navigation ---
         m = _NAV_RE.search(t)
@@ -215,7 +305,8 @@ class CommandParser:
             target = m.group(1).strip()
             first_word = target.split()[0].lower()
             if first_word not in _DIRECTIONS:
-                return ParsedCommand('navigation', target, 'go to')
+                return ParsedCommand('navigation', target, 'go to',
+                                     robot=robot)
 
         return None  # no rule matched
 
@@ -237,15 +328,25 @@ class CommandParser:
             log.info('Ollama raw response: %s', content)
 
             data = json.loads(content)
+            robot = self._normalize_robot(
+                data.get('robot', _DEFAULT_ROBOT).strip()
+            )
             category = data.get('category', '').strip().lower()
             obj = data.get('object', '').strip()
             instr = data.get('instruction', '').strip()
 
-            if category not in ('navigation', 'manipulation', 'locomotion'):
+            if category not in ('navigation', 'manipulation', 'locomotion',
+                                'service'):
                 log.warning('Unknown category "%s": %s', category, data)
                 return None
 
-            if category != 'locomotion' and (not obj or not instr):
+            service = data.get('service', '').strip()
+
+            if category == 'service' and not service:
+                log.warning('Empty service name for service command: %s', data)
+                return None
+
+            if category not in ('locomotion', 'service') and (not obj or not instr):
                 log.warning('Empty object/instruction for %s: %s', category, data)
                 return None
 
@@ -253,6 +354,8 @@ class CommandParser:
                 category=category,
                 object=obj,
                 instruction=instr,
+                robot=robot,
+                service=service,
                 dx=float(data.get('dx', 0.0)),
                 dy=float(data.get('dy', 0.0)),
                 dyaw=float(data.get('dyaw', 0.0)),
