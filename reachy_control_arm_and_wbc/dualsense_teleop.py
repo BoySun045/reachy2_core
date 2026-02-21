@@ -79,8 +79,8 @@ class DualSenseTeleop(Node):
         self._robot_idx = ROBOT_LIST.index(robot)
 
         # ── Parameters ────────────────────────────────────────────────────
-        self.declare_parameter("linear_speed", 2.0)      # m/s at full stick
-        self.declare_parameter("angular_speed", 2.0)     # rad/s at full stick
+        self.declare_parameter("linear_speed", 1.0)      # m/s at full stick
+        self.declare_parameter("angular_speed", 1.0)     # rad/s at full stick
         self.declare_parameter("publish_rate", 50.0)     # Hz
 
         self.linear_speed = self.get_parameter("linear_speed").value
@@ -88,7 +88,7 @@ class DualSenseTeleop(Node):
         self.pub_rate = self.get_parameter("publish_rate").value
 
         # ── Speed multiplier (L1/R1 adjustable) ──────────────────────────
-        self.speed_scale = 1.0
+        self.speed_scale = 0.75
 
         # ── Joystick state ────────────────────────────────────────────────
         self.axes = {

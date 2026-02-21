@@ -123,10 +123,16 @@ class VidBotManager(Node):
         """Capture the object name and instruction from the prompt node."""
         try:
             data = json.loads(msg.data)
+            robot = data.get("robot", "reachy").strip().lower()
+            if robot != "reachy":
+                self.get_logger().info(
+                    f"Ignoring trigger for robot '{robot}' (this manager handles reachy)"
+                )
+                return
             self.current_object = data.get("object", "").strip().lower()
             self.current_instruction = data.get("instruction", "").strip().lower()
             self.get_logger().info(
-                f"Trigger received: object='{self.current_object}', "
+                f"Trigger received: robot={robot}, object='{self.current_object}', "
                 f"instruction='{self.current_instruction}'"
             )
         except json.JSONDecodeError:
