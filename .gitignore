@@ -134,3 +134,13 @@ Cargo.lock
 
 # VSCODE
 .vscode/
+
+# Data / model artifacts
+data_dso/
+*.npz
+*.npy
+*.pth
+
+# ROS2 build artifacts
+install/
+log/

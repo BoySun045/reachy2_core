@@ -1,25 +1,16 @@
 import os
+import sys
 import re
 import glob
 import numpy as np
 import open3d as o3d
 from tqdm import tqdm
 
-# ----------------------------
-# User config
-# ----------------------------
-DATA_DIR = os.path.join(os.path.dirname(__file__),
-                        "data_dso/2026_02_20-14_50_41-default_experiment")
-RGB_DIR = os.path.join(DATA_DIR, "rgb")
-DEPTH_DIR = os.path.join(DATA_DIR, "depth")
-POSE_DIR = os.path.join(DATA_DIR, "camera_poses")
-INTRINSIC_DIR = os.path.join(DATA_DIR, "camera_intrinsics")
-
 DEPTH_SCALE = 1000.0
-DEPTH_TRUNC = 3
+DEPTH_TRUNC = 3.5
 
 VOXEL_LENGTH = 0.02
-SDF_TRUNC = 0.05
+SDF_TRUNC = 0.03
 
 STAT_NB_NEIGHBORS = 20
 STAT_STD_RATIO = 2.0
@@ -103,12 +94,17 @@ def make_trajectory_line(points_xyz: np.ndarray) -> o3d.geometry.LineSet:
 # ----------------------------
 # Main
 # ----------------------------
-def run_tsdf_fusion():
+def run_tsdf_fusion(data_dir: str):
+    rgb_dir = os.path.join(data_dir, "rgb")
+    depth_dir = os.path.join(data_dir, "depth")
+    pose_dir = os.path.join(data_dir, "camera_poses")
+    intrinsic_dir = os.path.join(data_dir, "camera_intrinsics")
+
     # Collect per-step files
-    rgb_files = collect_step_files(RGB_DIR, "rgb", ".png")
-    depth_files = collect_step_files(DEPTH_DIR, "depth", ".png")
-    pose_files = collect_step_files(POSE_DIR, "camera_pose", ".npy")
-    intrinsic_files = collect_step_files(INTRINSIC_DIR, "camera_intrinsics", ".npy")
+    rgb_files = collect_step_files(rgb_dir, "rgb", ".png")
+    depth_files = collect_step_files(depth_dir, "depth", ".png")
+    pose_files = collect_step_files(pose_dir, "camera_pose", ".npy")
+    intrinsic_files = collect_step_files(intrinsic_dir, "camera_intrinsics", ".npy")
 
     # Find common steps across all modalities
     common_steps = sorted(
@@ -207,7 +203,7 @@ def run_tsdf_fusion():
 
     # Convert to XY-ground, Z-up frame before saving
     pcd.points = o3d.utility.Vector3dVector(to_z_up(np.asarray(pcd.points)))
-    pcd_path = os.path.join(DATA_DIR, "tsdf_fused.ply")
+    pcd_path = os.path.join(data_dir, "tsdf_fused.ply")
     o3d.io.write_point_cloud(pcd_path, pcd)
     print(f"Saved point cloud: {pcd_path}")
 
@@ -215,7 +211,7 @@ def run_tsdf_fusion():
     mesh.compute_vertex_normals()
     mesh.vertices = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertices)))
     mesh.vertex_normals = o3d.utility.Vector3dVector(to_z_up(np.asarray(mesh.vertex_normals)))
-    mesh_path = os.path.join(DATA_DIR, "tsdf_mesh.ply")
+    mesh_path = os.path.join(data_dir, "tsdf_mesh.ply")
     o3d.io.write_triangle_mesh(mesh_path, mesh)
     print(f"Saved mesh: {mesh_path}")
 
@@ -232,6 +228,20 @@ def run_tsdf_fusion():
     geoms = [pcd, world_frame, traj] + cam_frustums
     o3d.visualization.draw_geometries(geoms)
 
+    # Also visualize the saved tsdf_fused.ply to confirm
+    pcd_saved = o3d.io.read_point_cloud(pcd_path)
+    origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="tsdf_fused.ply")
+    vis.add_geometry(pcd_saved)
+    vis.add_geometry(origin)
+    vis.get_render_option().point_size = 2.0
+    vis.run()
+    vis.destroy_window()
+
 
 if __name__ == "__main__":
-    run_tsdf_fusion()
+    if len(sys.argv) < 2:
+        print(f"Usage: python3 {sys.argv[0]} <path/to/data_dir/>")
+        sys.exit(1)
+    run_tsdf_fusion(sys.argv[1])
