@@ -8,14 +8,20 @@ ROS2 node wrapping the path planner from path_planner_o3d.py.
 - On each goal: solves, assigns look-at orientations, publishes the
   trajectory as nav_msgs/Path.
 
+Supports two planning modes (set in the YAML config or via --mode):
+  collision    – obstacle point cloud → invalid voxels, polygon-stack checker
+  reachability – reachability point cloud → valid voxels, stay-inside checker
+
 Usage:
-    python3 path_planner_node.py
+    python3 path_planner_node.py --config pathplanner_config.yaml [--mode collision|reachability]
 """
 
 import os
+import argparse
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
+import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -27,7 +33,6 @@ import open3d as o3d
 
 from rrt_point3d import PathPlanner
 from path_planner_o3d import (
-    PCD_PATH,
     VOXEL_SIZE,
     CROP_VERT,
     Z_PLANE,
@@ -48,6 +53,20 @@ from path_planner_o3d import (
     assign_look_at_orientations,
 )
 
+
+def load_config(config_path: str) -> dict:
+    """Load YAML config and resolve paths relative to the config file directory."""
+    config_path = os.path.abspath(config_path)
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    config_dir = os.path.dirname(config_path)
+    data_dir = os.path.join(config_dir, cfg["data_dir"])
+    cfg["_data_dir"] = data_dir
+    cfg["_pcd_path"] = os.path.join(data_dir, cfg["pcd_file"])
+    cfg["_reachability_path"] = os.path.join(data_dir, cfg["reachability_file"])
+    cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
+    return cfg
+
 FRAME_ID = "map"
 
 # Fallback start pose (used when no live localization is available)
@@ -56,53 +75,25 @@ START_YAW_FALLBACK = -np.pi / 2
 
 
 class PathPlannerNode(Node):
-    def __init__(self):
+    def __init__(self, cfg: dict, mode: str):
         super().__init__("path_planner")
+
+        self._mode = mode
+        self.get_logger().info(f"Planning mode: {mode}")
 
         # ---- Live pose from localization node ----
         self._current_pos = None  # np.array([x, y, z]) in z-up frame
         self._current_yaw = None  # float, radians
 
-        # ---- Load scene & build planner (once) ----
-        self.get_logger().info(f"Loading point cloud: {PCD_PATH}")
-        pcd = o3d.io.read_point_cloud(PCD_PATH)
-        if len(pcd.points) == 0:
-            raise RuntimeError(f"Empty point cloud: {PCD_PATH}")
-
-        vg, invalid_vx_all, pcd_used = pcd_to_invalid_voxels(
-            pcd, VOXEL_SIZE, crop_vert=CROP_VERT
-        )
-        self.get_logger().info(f"Invalid voxels: {invalid_vx_all.shape[0]}")
-
-        if ENABLE_FLOOR_CUT:
-            invalid_vx_all = invalid_vx_all[invalid_vx_all[:, 2] > FLOOR_CUT]
-            self.get_logger().info(
-                f"After floor cut: {invalid_vx_all.shape[0]}"
-            )
-
-        bound = aabb_to_bound(
-            pcd_used.get_axis_aligned_bounding_box(), BOUND_MARGIN
-        )
-        bound["low_z"] = float(Z_PLANE - Z_BOUND_EPS)
-        bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
-
-        poly_slices, _ = build_robot_poly_slices()
-        self.get_logger().info(f"Robot polygon slices: {len(poly_slices)}")
-
+        # ---- Build planner (once) ----
         self._planner = PathPlanner()
-        self._planner.use_state(use_invx=True)
-        self._planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
-        self._planner.update_sp(
-            bound, None, invalid_vx_all, input_vx_size=VOXEL_SIZE
-        )
-        self._planner.set_robot_polygon_stack(
-            slices=poly_slices,
-            z_mode="offset",
-            z_band=POLY_VERT_BAND,
-            margin=POLY_MARGIN,
-        )
-        self._planner.use_validity_checker("poly_stack")
-        self._bound = bound
+
+        if mode == "collision":
+            self._setup_collision_mode(cfg)
+        elif mode == "reachability":
+            self._setup_reachability_mode(cfg)
+        else:
+            raise ValueError(f"Unknown planning mode: {mode!r}")
 
         # ---- Publishers ----
         latched_qos = QoSProfile(
@@ -127,6 +118,84 @@ class PathPlannerNode(Node):
         )
 
         self.get_logger().info("PathPlanner node ready, waiting for goals...")
+
+    # ------------------------------------------------------------------
+    # Mode setup helpers
+    # ------------------------------------------------------------------
+    def _setup_collision_mode(self, cfg: dict):
+        """Obstacle avoidance: PCD → invalid voxels + polygon-stack checker."""
+        pcd_path = cfg["_pcd_path"]
+        self.get_logger().info(f"[collision] Loading obstacle cloud: {pcd_path}")
+        pcd = o3d.io.read_point_cloud(pcd_path)
+        if len(pcd.points) == 0:
+            raise RuntimeError(f"Empty point cloud: {pcd_path}")
+
+        vg, invalid_vx_all, pcd_used = pcd_to_invalid_voxels(
+            pcd, VOXEL_SIZE, crop_vert=CROP_VERT
+        )
+        self.get_logger().info(f"Invalid voxels: {invalid_vx_all.shape[0]}")
+
+        if ENABLE_FLOOR_CUT:
+            invalid_vx_all = invalid_vx_all[invalid_vx_all[:, 2] > FLOOR_CUT]
+            self.get_logger().info(f"After floor cut: {invalid_vx_all.shape[0]}")
+
+        bound = aabb_to_bound(
+            pcd_used.get_axis_aligned_bounding_box(), BOUND_MARGIN
+        )
+        bound["low_z"] = float(Z_PLANE - Z_BOUND_EPS)
+        bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
+
+        poly_slices, _ = build_robot_poly_slices()
+        self.get_logger().info(f"Robot polygon slices: {len(poly_slices)}")
+
+        self._planner.use_state(use_invx=True)
+        self._planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
+        self._planner.update_sp(
+            bound, None, invalid_vx_all, input_vx_size=VOXEL_SIZE
+        )
+        self._planner.set_robot_polygon_stack(
+            slices=poly_slices,
+            z_mode="offset",
+            z_band=POLY_VERT_BAND,
+            margin=POLY_MARGIN,
+        )
+        self._planner.use_validity_checker("poly_stack")
+        self._bound = bound
+
+    def _setup_reachability_mode(self, cfg: dict):
+        """Stay-inside-reachable-space: reachability cloud → valid voxels."""
+        reach_path = cfg["_reachability_path"]
+        self.get_logger().info(f"[reachability] Loading reachability cloud: {reach_path}")
+        pcd_reach = o3d.io.read_point_cloud(reach_path)
+        if len(pcd_reach.points) == 0:
+            raise RuntimeError(f"Empty reachability cloud: {reach_path}")
+
+        # Project reachable points to the planning plane
+        reach_pts = np.asarray(pcd_reach.points).copy()
+        reach_pts[:, 2] = Z_PLANE
+        self.get_logger().info(f"Reachable points: {reach_pts.shape[0]}")
+
+        bound = aabb_to_bound(
+            pcd_reach.get_axis_aligned_bounding_box(), BOUND_MARGIN
+        )
+        bound["low_z"] = float(Z_PLANE - Z_BOUND_EPS)
+        bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
+
+        self._planner.use_state(use_invx=False)
+        self._planner.update_collision_radius(VOXEL_SIZE * 2.0, 0)
+        self._planner.update_sp(
+            bound, reach_pts, None, input_vx_size=VOXEL_SIZE
+        )
+        self._planner.use_validity_checker("default")
+        self._bound = bound
+
+    # ------------------------------------------------------------------
+    def _check_state_valid(self, state_xyz):
+        """Check validity using the mode-appropriate checker."""
+        if self._mode == "collision":
+            return self._planner.isStateValid_poly_stack(state_xyz)
+        else:
+            return self._planner.isStateValid(state_xyz)
 
     # ------------------------------------------------------------------
     def _on_robot_pose(self, msg: Odometry):
@@ -182,14 +251,15 @@ class PathPlannerNode(Node):
         start_xz = force_z(start_pos, Z_PLANE)
         goal_xz = force_z(goal_pos, Z_PLANE)
 
-        start_ok = self._planner.isStateValid_poly_stack(start_xz)
-        goal_ok = self._planner.isStateValid_poly_stack(goal_xz)
+        start_ok = self._check_state_valid(start_xz)
+        goal_ok = self._check_state_valid(goal_xz)
         self.get_logger().info(
             f"Validity: start={start_ok}  goal={goal_ok}"
         )
 
         if not start_ok or not goal_ok:
-            self.get_logger().warn("Start or goal is in collision, solving anyway...")
+            label = "in collision" if self._mode == "collision" else "outside reachable space"
+            self.get_logger().warn(f"Start or goal is {label}, solving anyway...")
 
         start = {"pos": start_xz, "quat": yaw_to_quat(start_yaw)}
         goal = {"pos": goal_xz, "quat": goal_quat}
@@ -237,9 +307,19 @@ class PathPlannerNode(Node):
         self.get_logger().info("Published trajectory on ~/trajectory")
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = PathPlannerNode()
+def main():
+    parser = argparse.ArgumentParser(description="Path Planner Node")
+    parser.add_argument("--config", required=True, help="Path to YAML config file")
+    parser.add_argument(
+        "--mode", choices=["collision", "reachability"], default=None,
+        help="Planning mode (overrides config file)"
+    )
+    args, remaining = parser.parse_known_args()
+
+    rclpy.init(args=remaining)
+    cfg = load_config(args.config)
+    mode = args.mode if args.mode else cfg.get("planning_mode", "collision")
+    node = PathPlannerNode(cfg, mode)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

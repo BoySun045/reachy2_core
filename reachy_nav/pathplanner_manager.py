@@ -8,12 +8,15 @@ Usage:
 """
 
 import os
+import sys
+import argparse
 import gzip
 import pickle
 import random
 import re
 import threading
 
+import yaml
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -29,42 +32,51 @@ from std_msgs.msg import ColorRGBA, String
 
 import open3d as o3d
 
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(
-    THIS_DIR, "data_dso/2026_02_16-12_02_34-default_experiment"
-)
-PCD_PATH = os.path.join(DATA_DIR, "tsdf_fused.ply")
-REACHABILITY_PATH = os.path.join(DATA_DIR, "reachability.ply")
-OBJECTS_PATH = os.path.join(
-    DATA_DIR, "object_scene_graph/frame_final_objects.pkl.gz"
-)
 FRAME_ID = "map"
 MAX_ARM_REACH = 0.80  # metres from base centre
 
 
+def load_config(config_path: str) -> dict:
+    """Load YAML config and resolve paths relative to the config file directory."""
+    config_path = os.path.abspath(config_path)
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    config_dir = os.path.dirname(config_path)
+    data_dir = os.path.join(config_dir, cfg["data_dir"])
+    cfg["_data_dir"] = data_dir
+    cfg["_pcd_path"] = os.path.join(data_dir, cfg["pcd_file"])
+    cfg["_reachability_path"] = os.path.join(data_dir, cfg["reachability_file"])
+    cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
+    return cfg
+
+
 class PathPlannerManagerNode(Node):
-    def __init__(self):
+    def __init__(self, cfg: dict):
         super().__init__("pathplanner_manager")
 
+        pcd_path = cfg["_pcd_path"]
+        reachability_path = cfg["_reachability_path"]
+        objects_path = cfg["_objects_path"]
+
         # --- Load TSDF point cloud ---
-        self.get_logger().info(f"Loading point cloud from {PCD_PATH}")
-        pcd = o3d.io.read_point_cloud(PCD_PATH)
+        self.get_logger().info(f"Loading point cloud from {pcd_path}")
+        pcd = o3d.io.read_point_cloud(pcd_path)
         if len(pcd.points) == 0:
-            raise RuntimeError(f"Empty point cloud: {PCD_PATH}")
+            raise RuntimeError(f"Empty point cloud: {pcd_path}")
         self.get_logger().info(f"Loaded {len(pcd.points)} points")
         self._pcd_msg = self._build_pointcloud2_msg(pcd)
 
         # --- Load reachability map ---
-        self.get_logger().info(f"Loading reachability from {REACHABILITY_PATH}")
-        pcd_reach = o3d.io.read_point_cloud(REACHABILITY_PATH)
+        self.get_logger().info(f"Loading reachability from {reachability_path}")
+        pcd_reach = o3d.io.read_point_cloud(reachability_path)
         self._reachable_pts = np.asarray(pcd_reach.points)
         self.get_logger().info(
             f"Loaded {len(self._reachable_pts)} reachable points"
         )
 
         # --- Load objects (transform bbox from native to XY-ground Z-up) ---
-        self.get_logger().info(f"Loading objects from {OBJECTS_PATH}")
-        with gzip.open(OBJECTS_PATH, "rb") as f:
+        self.get_logger().info(f"Loading objects from {objects_path}")
+        with gzip.open(objects_path, "rb") as f:
             data = pickle.load(f)
         self._objects = data["objects"]
         for obj in self._objects:
@@ -422,9 +434,14 @@ class PathPlannerManagerNode(Node):
         print(f"--- Total: {len(self._objects)} objects ---\n")
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = PathPlannerManagerNode()
+def main():
+    parser = argparse.ArgumentParser(description="PathPlanner Manager Node")
+    parser.add_argument("--config", required=True, help="Path to YAML config file")
+    args, remaining = parser.parse_known_args()
+
+    rclpy.init(args=remaining)
+    cfg = load_config(args.config)
+    node = PathPlannerManagerNode(cfg)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
