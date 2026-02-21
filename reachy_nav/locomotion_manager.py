@@ -48,7 +48,7 @@ class LocomotionManager(Node):
     def __init__(self):
         super().__init__("locomotion_manager")
 
-        self.declare_parameter("trajectory_topic", "/occ_planner/planned_path")
+        self.declare_parameter("trajectory_topic", "/path_planner/trajectory")
         traj_topic = self.get_parameter("trajectory_topic").value
 
         # Current pose (updated by localization)

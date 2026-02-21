@@ -63,7 +63,7 @@ GOAL_POS  = np.array([1.5, -5.0, 0.0], dtype=float)
 GOAL_YAW  = None       # None = face object/last segment; or set radians
 
 # Planner
-TIME_LIMIT = 5.0
+TIME_LIMIT = 1.5
 METHOD = "rrtstar"
 
 # ----------------------------

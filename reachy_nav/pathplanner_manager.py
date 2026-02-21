@@ -74,17 +74,20 @@ class PathPlannerManagerNode(Node):
             f"Loaded {len(self._reachable_pts)} reachable points"
         )
 
-        # --- Load objects (transform bbox from native to XY-ground Z-up) ---
+        # --- Load objects ---
         self.get_logger().info(f"Loading objects from {objects_path}")
         with gzip.open(objects_path, "rb") as f:
             data = pickle.load(f)
         self._objects = data["objects"]
-        for obj in self._objects:
-            bbox = np.array(obj["bbox_np"], dtype=np.float64)
-            y = bbox[:, 1].copy()
-            bbox[:, 1] = bbox[:, 2]
-            bbox[:, 2] = -y
-            obj["bbox_np"] = bbox
+        if cfg.get("z_up", False):
+            # Convert bboxes from Y-up to Z-up: (x, y, z) -> (x, z, -y)
+            for obj in self._objects:
+                bbox = np.array(obj["bbox_np"], dtype=np.float64)
+                y = bbox[:, 1].copy()
+                bbox[:, 1] = bbox[:, 2]
+                bbox[:, 2] = -y
+                obj["bbox_np"] = bbox
+            self.get_logger().info("Object bboxes converted to Z-up")
         self.get_logger().info(f"Loaded {len(self._objects)} objects")
 
         # --- Publishers ---

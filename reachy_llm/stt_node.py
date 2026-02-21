@@ -18,9 +18,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from dualsense_speech_to_text.audio_capture import AudioCapture
-from dualsense_speech_to_text.transcriber import Transcriber
-from dualsense_speech_to_text.command_parser import CommandParser
+from audio_capture import AudioCapture
+from transcriber import Transcriber
+from command_parser import CommandParser
 
 
 # VAD state machine states

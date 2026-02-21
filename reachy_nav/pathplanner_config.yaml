@@ -9,7 +9,11 @@ pcd_file: "tsdf_fused.ply"
 reachability_file: "reachability.ply"
 objects_file: "object_scene_graph/frame_final_objects.pkl.gz"
 
+# Coordinate frame: set to true if TSDF was generated with --z-up.
+# When true, object bboxes are converted from Y-up to Z-up to match.
+z_up: false
+
 # Planning mode:
 #   "collision"    - uses pcd as obstacles, collision-checks with robot polygon stack
 #   "reachability" - uses reachability cloud as valid space, no collision check needed
-planning_mode: "collision"
+planning_mode: "reachability"
