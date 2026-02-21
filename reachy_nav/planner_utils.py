@@ -69,7 +69,8 @@ def slerp(quat0, quat1, t):
     return quat0 * np.cos(theta) + quat2 * np.sin(theta)
 
 
-def interpolate_waypoints(start, end, num_interp_points=20):
+def interpolate_waypoints(start, end, num_interp_points=None,
+                          dist_step=0.30, angle_step_deg=15.0):
     """
     Interpolate between start and end poses using linear position interpolation
     and SLERP for quaternion rotation.
@@ -80,8 +81,13 @@ def interpolate_waypoints(start, end, num_interp_points=20):
         {"pos": [x, y, z], "quat": [x, y, z, w]}
     end : dict
         {"pos": [x, y, z], "quat": [x, y, z, w]}
-    num_interp_points : int
+    num_interp_points : int or None
         Number of intermediate points (excluding start and end).
+        If None, automatically computed from dist_step and angle_step_deg.
+    dist_step : float
+        Insert one point every this many metres of translation (default 0.20).
+    angle_step_deg : float
+        Insert one point every this many degrees of rotation (default 15.0).
 
     Returns
     -------
@@ -93,6 +99,18 @@ def interpolate_waypoints(start, end, num_interp_points=20):
 
     start_quat = np.asarray(start["quat"], dtype=float)
     end_quat = np.asarray(end["quat"], dtype=float)
+
+    if num_interp_points is None:
+        dist = np.linalg.norm(end_pos - start_pos)
+        dot = np.clip(np.abs(np.dot(start_quat, end_quat)), 0.0, 1.0)
+        angle_deg = np.degrees(2.0 * np.arccos(dot))
+        n_from_dist = int(dist / dist_step) if dist_step > 0 else 0
+        n_from_angle = int(angle_deg / angle_step_deg) if angle_step_deg > 0 else 0
+        num_interp_points = max(n_from_dist, n_from_angle)
+
+    if num_interp_points <= 0:
+        return [{"pos": start_pos, "quat": start_quat},
+                {"pos": end_pos, "quat": end_quat}]
 
     # Time steps (excluding endpoints for mids)
     t_values = np.linspace(0.0, 1.0, num_interp_points + 2)[1:-1]

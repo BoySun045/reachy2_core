@@ -26,7 +26,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
 
 import open3d as o3d
@@ -81,9 +81,9 @@ class PathPlannerNode(Node):
         self._mode = mode
         self.get_logger().info(f"Planning mode: {mode}")
 
-        # ---- Live pose from localization node ----
-        self._current_pos = None  # np.array([x, y, z]) in z-up frame
-        self._current_yaw = None  # float, radians
+        # ---- Per-robot live pose from localization ----
+        self._current_pos = {"reachy": None, "spot": None}
+        self._current_yaw = {"reachy": None, "spot": None}
 
         # ---- Build planner (once) ----
         self._planner = PathPlanner()
@@ -95,25 +95,44 @@ class PathPlannerNode(Node):
         else:
             raise ValueError(f"Unknown planning mode: {mode!r}")
 
-        # ---- Publishers ----
+        # ---- Publishers (per-robot) ----
         latched_qos = QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
-        self._path_pub = self.create_publisher(Path, "~/trajectory", latched_qos)
+        self._path_pubs = {
+            "reachy": self.create_publisher(Path, "~/trajectory", latched_qos),
+            "spot": self.create_publisher(Path, "/spot/planned_path", latched_qos),
+        }
+        self._pose_array_pubs = {
+            "reachy": self.create_publisher(PoseArray, "~/trajectory_poses", latched_qos),
+            "spot": self.create_publisher(PoseArray, "/spot/planned_path_poses", latched_qos),
+        }
 
-        # ---- Subscriber: goal from manager ----
+        # ---- Subscribers: goals from manager (per-robot) ----
         self.create_subscription(
             PoseStamped,
             "/pathplanner_manager/nav_goal",
-            self._on_goal,
+            lambda msg: self._on_goal(msg, "reachy"),
+            latched_qos,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/pathplanner_manager/spot/nav_goal",
+            lambda msg: self._on_goal(msg, "spot"),
             latched_qos,
         )
 
-        # ---- Subscriber: live robot pose from localization node ----
+        # ---- Subscribers: live robot pose (per-robot) ----
         self.create_subscription(
             Odometry,
             "/slam/base_odom",
-            self._on_robot_pose,
+            lambda msg: self._on_robot_pose(msg, "reachy"),
+            10,
+        )
+        self.create_subscription(
+            Odometry,
+            "/spot/odometry/corrected",
+            lambda msg: self._on_robot_pose(msg, "spot"),
             10,
         )
 
@@ -198,27 +217,29 @@ class PathPlannerNode(Node):
             return self._planner.isStateValid(state_xyz)
 
     # ------------------------------------------------------------------
-    def _on_robot_pose(self, msg: Odometry):
+    def _on_robot_pose(self, msg: Odometry, robot: str):
         pose = msg.pose.pose
-        self._current_pos = np.array([
+        self._current_pos[robot] = np.array([
             pose.position.x,
             pose.position.y,
             pose.position.z,
         ])
-        self._current_yaw = quat_to_yaw(np.array([
+        self._current_yaw[robot] = quat_to_yaw(np.array([
             pose.orientation.x,
             pose.orientation.y,
             pose.orientation.z,
             pose.orientation.w,
         ]))
+        pos = self._current_pos[robot]
+        yaw = self._current_yaw[robot]
         self.get_logger().info(
-            f"Robot pose updated: [{self._current_pos[0]:.3f}, "
-            f"{self._current_pos[1]:.3f}] yaw={np.degrees(self._current_yaw):.1f}°",
+            f"[{robot}] Pose updated: [{pos[0]:.3f}, "
+            f"{pos[1]:.3f}] yaw={np.degrees(yaw):.1f}°",
             throttle_duration_sec=5.0,
         )
 
     # ------------------------------------------------------------------
-    def _on_goal(self, msg: PoseStamped):
+    def _on_goal(self, msg: PoseStamped, robot: str):
         goal_pos = np.array([
             msg.pose.position.x,
             msg.pose.position.y,
@@ -233,19 +254,19 @@ class PathPlannerNode(Node):
         goal_yaw = quat_to_yaw(goal_quat)
 
         self.get_logger().info(
-            f"Goal received: [{goal_pos[0]:.3f}, {goal_pos[1]:.3f}, "
+            f"[{robot}] Goal received: [{goal_pos[0]:.3f}, {goal_pos[1]:.3f}, "
             f"{goal_pos[2]:.3f}] yaw={np.degrees(goal_yaw):.1f}°"
         )
 
         # ---- Determine start pose ----
-        if self._current_pos is not None:
-            start_pos = self._current_pos
-            start_yaw = self._current_yaw
-            self.get_logger().info("Using live localized pose as start")
+        if self._current_pos[robot] is not None:
+            start_pos = self._current_pos[robot]
+            start_yaw = self._current_yaw[robot]
+            self.get_logger().info(f"[{robot}] Using live localized pose as start")
         else:
             start_pos = START_POS_FALLBACK
             start_yaw = START_YAW_FALLBACK
-            self.get_logger().warn("No live pose, using fallback start")
+            self.get_logger().warn(f"[{robot}] No live pose, using fallback start")
 
         # ---- Solve ----
         start_xz = force_z(start_pos, Z_PLANE)
@@ -303,8 +324,19 @@ class PathPlannerNode(Node):
             ps.pose.orientation.w = float(q[3])
             path_msg.poses.append(ps)
 
-        self._path_pub.publish(path_msg)
-        self.get_logger().info("Published trajectory on ~/trajectory")
+        path_pub = self._path_pubs[robot]
+        path_pub.publish(path_msg)
+
+        pose_array_msg = PoseArray()
+        pose_array_msg.header = path_msg.header
+        pose_array_msg.poses = [ps.pose for ps in path_msg.poses]
+        pose_array_pub = self._pose_array_pubs[robot]
+        pose_array_pub.publish(pose_array_msg)
+
+        self.get_logger().info(
+            f"[{robot}] Published trajectory on {path_pub.topic_name} "
+            f"and {pose_array_pub.topic_name}"
+        )
 
 
 def main():

@@ -54,22 +54,6 @@ def check_image_sizes(color_img, depth_arr, width, height, rgb_path):
         )
 
 
-def to_z_up(pts: np.ndarray) -> np.ndarray:
-    """Transform from native (XZ ground, Y-down) to (XY ground, Z-up).
-
-    Mapping: (x, y, z) -> (x, z, -y)
-    """
-    out = np.array(pts, dtype=np.float64)
-    if out.ndim == 1:
-        y = out[1].copy()
-        out[1] = out[2]
-        out[2] = -y
-    else:
-        y = out[:, 1].copy()
-        out[:, 1] = out[:, 2]
-        out[:, 2] = -y
-    return out
-
 
 def make_trajectory_line(points_xyz: np.ndarray) -> o3d.geometry.LineSet:
     if len(points_xyz) < 2:
@@ -193,7 +177,6 @@ def run_tsdf_fusion(data_dir: str):
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=STAT_NB_NEIGHBORS, std_ratio=STAT_STD_RATIO)
     print(f"Statistical outlier removal: {n_before} -> {len(pcd.points)} points ({n_before - len(pcd.points)} removed)")
 
-    # World frame is already Z-up for this data
     pcd_path = os.path.join(data_dir, "tsdf_fused.ply")
     o3d.io.write_point_cloud(pcd_path, pcd)
     print(f"Saved point cloud: {pcd_path}")

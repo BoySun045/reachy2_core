@@ -7,6 +7,7 @@ import os
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from rrt_point3d import PathPlanner
+from planner_utils import interpolate_waypoints
 
 
 # ----------------------------
@@ -196,14 +197,26 @@ def quat_to_yaw(quat) -> float:
     return Rot.from_quat(quat).as_euler("xyz")[2]
 
 
-def assign_look_at_orientations(solution, start_yaw, goal_yaw=None):
+def assign_look_at_orientations(solution, start_yaw, goal_yaw=None,
+                                interpolate=True):
     """Set quaternions along a path.
 
     - First waypoint keeps *start_yaw*.
     - Intermediate waypoints (1..n-2) face the next waypoint.
     - Last waypoint keeps *goal_yaw* (or faces along the last segment
       if *goal_yaw* is None).
+
+    If *interpolate* is True, densify the path by inserting points
+    between each consecutive pair of waypoints (one point every 20 cm
+    or 15 deg, whichever requires more).
     """
+    if interpolate and len(solution) >= 2:
+        dense = [solution[0]]
+        for i in range(1, len(solution)):
+            segment = interpolate_waypoints(solution[i - 1], solution[i])
+            dense.extend(segment[1:])  # skip duplicate start of segment
+        solution = dense
+
     n = len(solution)
     if n == 0:
         return solution

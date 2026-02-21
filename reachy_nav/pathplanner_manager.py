@@ -7,6 +7,7 @@ Usage:
     python3 pathplanner_manager.py
 """
 
+import json
 import os
 import sys
 import argparse
@@ -53,6 +54,9 @@ def load_config(config_path: str) -> dict:
 class PathPlannerManagerNode(Node):
     def __init__(self, cfg: dict):
         super().__init__("pathplanner_manager")
+
+        self._planning_mode = cfg.get("planning_mode", "collision")
+        self.get_logger().info(f"Planning mode: {self._planning_mode}")
 
         pcd_path = cfg["_pcd_path"]
         reachability_path = cfg["_reachability_path"]
@@ -104,12 +108,19 @@ class PathPlannerManagerNode(Node):
         self._bbox_pub = self.create_publisher(
             Marker, "~/object_bbox", latched_qos
         )
-        self._goal_pub = self.create_publisher(
-            PoseStamped, "~/nav_goal", latched_qos
-        )
         self._reach_pub = self.create_publisher(
             PointCloud2, "~/reachability", 10
         )
+
+        # Per-robot nav goal publishers
+        self._goal_pubs = {
+            "reachy": self.create_publisher(
+                PoseStamped, "~/nav_goal", latched_qos
+            ),
+            "spot": self.create_publisher(
+                PoseStamped, "~/spot/nav_goal", latched_qos
+            ),
+        }
 
         # --- Build reachability PointCloud2 (green) ---
         self._reach_msg = self._build_pointcloud2_msg(pcd_reach)
@@ -198,16 +209,21 @@ class PathPlannerManagerNode(Node):
     # Navigation goal from reachability
     # ------------------------------------------------------------------
     def _compute_nav_goal(self, object_pos):
-        """Find the closest reachable point within arm reach of the object,
-        oriented with robot X facing the object.  Returns PoseStamped or None."""
+        """Find the closest reachable point to the object, oriented with
+        robot X facing the object.  In collision mode, only considers points
+        within MAX_ARM_REACH.  Returns PoseStamped or None."""
         obj_xy = object_pos[:2]
         dists = np.linalg.norm(self._reachable_pts[:, :2] - obj_xy, axis=1)
-        within = dists <= MAX_ARM_REACH
-        if not np.any(within):
-            return None
 
-        best = np.argmin(dists[within])
-        goal_pt = self._reachable_pts[within][best]
+        if self._planning_mode == "collision":
+            within = dists <= MAX_ARM_REACH
+            if not np.any(within):
+                return None
+            best = np.argmin(dists[within])
+            goal_pt = self._reachable_pts[within][best]
+        else:
+            best = np.argmin(dists)
+            goal_pt = self._reachable_pts[best]
 
         dx = obj_xy[0] - goal_pt[0]
         dy = obj_xy[1] - goal_pt[1]
@@ -273,11 +289,13 @@ class PathPlannerManagerNode(Node):
     # ------------------------------------------------------------------
     # Object query (shared by terminal and ROS subscriber)
     # ------------------------------------------------------------------
-    def _find_and_publish_object(self, query: str) -> bool:
+    def _find_and_publish_object(self, query: str,
+                                robot: str = "reachy") -> bool:
         """Find an object by partial name match and publish pose + nav goal.
 
         If query ends with a number (e.g. "robot dog 2"), selects that
         specific instance (1-indexed).  Otherwise picks randomly.
+        The nav goal is published to the robot-specific topic.
         Returns True if an object was found and published.
         """
         # Check for trailing index: "robot dog 2" → name="robot dog", idx=2
@@ -320,16 +338,31 @@ class PathPlannerManagerNode(Node):
         else:
             selected = matches[0]
 
-        self._publish_object(selected)
+        self._publish_object(selected, robot=robot)
         return True
 
     def _on_query(self, msg):
-        """Handle object query from LLM command router."""
-        query = msg.data.strip()
+        """Handle object query from LLM command router.
+
+        Message is JSON: {"robot": "reachy"|"spot", "object": "..."}
+        """
+        raw = msg.data.strip()
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+            robot = data.get("robot", "reachy")
+            query = data.get("object", "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            # Fallback: treat as plain-text query (terminal / manual publish)
+            robot = "reachy"
+            query = raw
         if not query:
             return
-        self.get_logger().info(f"Received query from LLM: '{query}'")
-        self._find_and_publish_object(query)
+        self.get_logger().info(
+            f"Received query from LLM: robot={robot}, object='{query}'"
+        )
+        self._find_and_publish_object(query, robot=robot)
 
     # ------------------------------------------------------------------
     # Terminal query loop
@@ -384,12 +417,12 @@ class PathPlannerManagerNode(Node):
                     print("  Invalid selection.")
                     continue
 
-            self._publish_object(selected)
+            self._publish_object(selected, robot="reachy")
 
-    def _publish_object(self, obj):
+    def _publish_object(self, obj, robot: str = "reachy"):
         centroid = obj["bbox_np"].mean(axis=0)
         self.get_logger().info(
-            f"Publishing '{obj['name']}' at "
+            f"[{robot}] Publishing '{obj['name']}' at "
             f"[{centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}]"
         )
         self._pose_pub.publish(self._compute_object_pose(obj))
@@ -399,15 +432,22 @@ class PathPlannerManagerNode(Node):
 
         goal = self._compute_nav_goal(centroid)
         if goal is not None:
-            self._goal_pub.publish(goal)
+            goal_pub = self._goal_pubs.get(robot)
+            if goal_pub is None:
+                self.get_logger().warn(
+                    f"No nav_goal publisher for robot '{robot}'"
+                )
+                return
+            goal_pub.publish(goal)
             p = goal.pose.position
             yaw = R.from_quat([
                 goal.pose.orientation.x, goal.pose.orientation.y,
                 goal.pose.orientation.z, goal.pose.orientation.w,
             ]).as_euler("xyz")[2]
+            topic_name = goal_pub.topic_name
             print(
                 f"  -> Nav goal: [{p.x:.3f}, {p.y:.3f}, {p.z:.3f}] "
-                f"yaw={np.degrees(yaw):.1f}° on ~/nav_goal"
+                f"yaw={np.degrees(yaw):.1f}° on {topic_name}"
             )
         else:
             print(

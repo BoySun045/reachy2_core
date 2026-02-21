@@ -7,11 +7,13 @@ command router, computes a target pose from the current robot pose,
 and publishes a 2-pose Path (start, goal) for the trajectory follower.
 
 Subscriptions:
-    /locomotion/command       — JSON {"dx", "dy", "dyaw"} (std_msgs/String)
-    /localization/robot_pose  — current robot pose (PoseStamped)
+    /locomotion/command  — JSON {"robot", "dx", "dy", "dyaw"} (std_msgs/String)
+    /slam/base_odom      — reachy odometry (Odometry)
+    /spot/odometry       — spot odometry (Odometry)
 
 Publications:
-    /path_planner/trajectory  — 2-pose path [current, target] (nav_msgs/Path)
+    /path_planner/trajectory   — reachy 2-pose path (nav_msgs/Path)
+    /spot/plan_path            — spot 2-pose path (nav_msgs/Path)
 
 Usage:
     python3 locomotion_manager.py
@@ -48,11 +50,11 @@ class LocomotionManager(Node):
     def __init__(self):
         super().__init__("locomotion_manager")
 
-        self.declare_parameter("trajectory_topic", "/path_planner/trajectory")
-        traj_topic = self.get_parameter("trajectory_topic").value
-
-        # Current pose (updated by localization)
-        self._current_pose = None
+        # Per-robot current pose (updated by odometry callbacks)
+        self._current_poses = {
+            "reachy": None,
+            "spot": None,
+        }
 
         # Subscribers
         latched_qos = QoSProfile(
@@ -60,26 +62,39 @@ class LocomotionManager(Node):
         )
         self.create_subscription(
             Odometry, "/slam/base_odom",
-            self._on_odom, 2,
+            self._on_reachy_odom, 2,
+        )
+        self.create_subscription(
+            Odometry, "/spot/odometry/corrected",
+            self._on_spot_odom, 2,
         )
         self.create_subscription(
             String, "/locomotion/command",
             self._on_command, 10,
         )
 
-        # Publisher
-        self._traj_pub = self.create_publisher(Path, traj_topic, latched_qos)
+        # Per-robot trajectory publishers
+        self._traj_pubs = {
+            "reachy": self.create_publisher(
+                Path, "/path_planner/trajectory", latched_qos
+            ),
+            "spot": self.create_publisher(
+                Path, "/spot/planned_path", latched_qos
+            ),
+        }
 
-        self.get_logger().info(
-            f"Locomotion manager ready. Publishing to {traj_topic}"
-        )
+        self.get_logger().info("Locomotion manager ready.")
 
-    def _on_odom(self, msg: Odometry):
-        self._current_pose = msg.pose.pose
+    def _on_reachy_odom(self, msg: Odometry):
+        self._current_poses["reachy"] = msg.pose.pose
+
+    def _on_spot_odom(self, msg: Odometry):
+        self._current_poses["spot"] = msg.pose.pose
 
     def _on_command(self, msg: String):
         try:
             data = json.loads(msg.data)
+            robot = data.get("robot", "reachy")
             dx = float(data.get("dx", 0.0))
             dy = float(data.get("dy", 0.0))
             dyaw = float(data.get("dyaw", 0.0))
@@ -87,15 +102,23 @@ class LocomotionManager(Node):
             self.get_logger().error(f"Bad locomotion command: {e}")
             return
 
-        if self._current_pose is None:
+        traj_pub = self._traj_pubs.get(robot)
+        if traj_pub is None:
+            self.get_logger().warn(
+                f"No trajectory publisher for robot '{robot}'"
+            )
+            return
+
+        current_pose = self._current_poses.get(robot)
+        if current_pose is None:
             self.get_logger().error(
-                "No robot pose available — cannot execute locomotion command"
+                f"No pose available for '{robot}' — cannot execute locomotion command"
             )
             return
 
         # Current pose
-        p = self._current_pose.position
-        cur_yaw = quat_to_yaw(self._current_pose.orientation)
+        p = current_pose.position
+        cur_yaw = quat_to_yaw(current_pose.orientation)
         cur_x, cur_y = p.x, p.y
 
         # Transform body-frame deltas to map frame
@@ -110,7 +133,8 @@ class LocomotionManager(Node):
         tgt_yaw = cur_yaw + dyaw
 
         self.get_logger().info(
-            f"Locomotion: body dx={dx:.3f} dy={dy:.3f} dyaw={math.degrees(dyaw):.1f}deg"
+            f"[{robot}] Locomotion: body dx={dx:.3f} dy={dy:.3f} "
+            f"dyaw={math.degrees(dyaw):.1f}deg"
         )
         self.get_logger().info(
             f"  Current: [{cur_x:.3f}, {cur_y:.3f}] yaw={math.degrees(cur_yaw):.1f}deg"
@@ -149,8 +173,8 @@ class LocomotionManager(Node):
         goal.pose.orientation.w = q[3]
 
         path.poses = [start, goal]
-        self._traj_pub.publish(path)
-        self.get_logger().info("Published 2-pose trajectory")
+        traj_pub.publish(path)
+        self.get_logger().info(f"[{robot}] Published 2-pose trajectory")
 
 
 def main(args=None):
