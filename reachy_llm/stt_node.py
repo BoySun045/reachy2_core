@@ -70,16 +70,19 @@ class SpeechToTextNode(Node):
         self._loco_pub = self.create_publisher(
             String, '/locomotion/command', 10)
 
-        # Spot service clients (all std_srvs/Trigger)
-        # "kill" is a special sequence: sit then rollover.
-        self._spot_services = {}
+        # Service clients (all std_srvs/Trigger), keyed by robot then service name
+        self._service_clients = {'spot': {}, 'reachy': {}}
+        # Spot services ("kill" is a special sequence: sit then rollover)
         for svc_name in ('stand', 'sit', 'arm_stow', 'arm_unstow',
                          'open_gripper', 'close_gripper',
                          'claim', 'power_on', 'power_off', 'rollover'):
-            topic = f'/spot/{svc_name}'
-            self._spot_services[svc_name] = self.create_client(
-                Trigger, topic)
-        self._spot_service_busy = False
+            self._service_clients['spot'][svc_name] = self.create_client(
+                Trigger, f'/spot/{svc_name}')
+        # Reachy services
+        for svc_name in ('arm_on', 'arm_off', 'arm_up', 'arm_down'):
+            self._service_clients['reachy'][svc_name] = self.create_client(
+                Trigger, f'/reachy/{svc_name}')
+        self._service_busy = False
 
         # Audio
         self.get_logger().info('Initializing microphone...')
@@ -243,49 +246,50 @@ class SpeechToTextNode(Node):
                 f'Routed to service: robot={robot}, '
                 f'service="{parsed.service}"')
             threading.Thread(
-                target=self._call_spot_service,
-                args=(parsed.service,),
+                target=self._call_service,
+                args=(robot, parsed.service),
                 daemon=True,
             ).start()
 
     # ------------------------------------------------------------------
-    # Spot service calls
+    # Service calls (spot + reachy)
     # ------------------------------------------------------------------
-    def _call_spot_service(self, service_name: str):
-        if self._spot_service_busy:
+    def _call_service(self, robot: str, service_name: str):
+        if self._service_busy:
             self.get_logger().warn(
-                'Spot service call already in progress, ignoring')
+                'Service call already in progress, ignoring')
             return
-        self._spot_service_busy = True
+        self._service_busy = True
         try:
-            if service_name == 'kill':
+            if robot == 'spot' and service_name == 'kill':
                 # Kill sequence: sit first, then rollover
-                self._call_single_service('sit')
-                self._call_single_service('rollover')
+                self._call_single_service('spot', 'sit')
+                self._call_single_service('spot', 'rollover')
             else:
-                self._call_single_service(service_name)
+                self._call_single_service(robot, service_name)
         finally:
-            self._spot_service_busy = False
+            self._service_busy = False
 
-    def _call_single_service(self, name: str):
-        client = self._spot_services.get(name)
+    def _call_single_service(self, robot: str, name: str):
+        clients = self._service_clients.get(robot, {})
+        client = clients.get(name)
         if client is None:
-            self.get_logger().error(f'No service client for "{name}"')
-            return
-        if not client.wait_for_service(timeout_sec=3.0):
             self.get_logger().error(
-                f'Service /spot/{name} not available')
+                f'No service client for {robot}/{name}')
+            return
+        topic = f'/{robot}/{name}'
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error(f'Service {topic} not available')
             return
         future = client.call_async(Trigger.Request())
         rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
         if future.result() is not None:
             result = future.result()
             self.get_logger().info(
-                f'/spot/{name}: success={result.success}, '
+                f'{topic}: success={result.success}, '
                 f'message="{result.message}"')
         else:
-            self.get_logger().error(
-                f'/spot/{name} call failed')
+            self.get_logger().error(f'{topic} call failed')
 
     def destroy_node(self):
         if self._audio.is_recording:

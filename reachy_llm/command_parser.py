@@ -56,6 +56,14 @@ _SPOT_SERVICE_RULES = [
     (re.compile(r'^(?:kill|roll\s*over|emergency(?:\s+stop)?)$', re.I), 'kill'),
 ]
 
+# --- Reachy service commands: arm on/off/up/down ---
+_REACHY_SERVICE_RULES = [
+    (re.compile(r'^(?:arm\s+on|turn\s+on(?:\s+(?:the\s+)?arm)?|wake\s+up)$', re.I), 'arm_on'),
+    (re.compile(r'^(?:arm\s+off|turn\s+off(?:\s+(?:the\s+)?arm)?|shut\s*down)$', re.I), 'arm_off'),
+    (re.compile(r'^(?:arm\s+up|arms?\s+up|ready(?:\s+(?:position|pose))?)$', re.I), 'arm_up'),
+    (re.compile(r'^(?:arm\s+down|arms?\s+down|rest(?:\s+(?:position|pose))?)$', re.I), 'arm_down'),
+]
+
 # --- Stop / halt / freeze ---
 _STOP_RE = re.compile(
     r'^(?:stop|halt|freeze|stay|don\'?t move|wait)$', re.I)
@@ -121,6 +129,9 @@ Valid service names for Spot:
   "stand", "sit", "arm_stow", "arm_unstow", "open_gripper", "close_gripper",
   "claim", "power_on", "power_off", "kill"
 
+Valid service names for Reachy:
+  "arm_on", "arm_off", "arm_up", "arm_down"
+
 For locomotion, convert distances to metres and directions to the robot body frame:
 - forward = +dx, backward = -dx
 - left = +dy, right = -dy
@@ -165,6 +176,18 @@ User: "spot power on"
 
 User: "spot kill"
 {"robot": "spot", "category": "service", "object": "", "instruction": "kill", "service": "kill", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "reachy turn on"
+{"robot": "reachy", "category": "service", "object": "", "instruction": "arm on", "service": "arm_on", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "reachy arm up"
+{"robot": "reachy", "category": "service", "object": "", "instruction": "arm up", "service": "arm_up", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "arm down"
+{"robot": "reachy", "category": "service", "object": "", "instruction": "arm down", "service": "arm_down", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "reachy turn off the arm"
+{"robot": "reachy", "category": "service", "object": "", "instruction": "arm off", "service": "arm_off", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
 User: "go to the table"
 {"robot": "reachy", "category": "navigation", "object": "table", "instruction": "go to", "service": "", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
@@ -241,6 +264,13 @@ class CommandParser:
         # --- Spot service commands (checked first — "stand", "sit", etc.) ---
         if robot == 'spot':
             for pattern, svc_name in _SPOT_SERVICE_RULES:
+                if pattern.match(t):
+                    return ParsedCommand('service', '', svc_name,
+                                         robot=robot, service=svc_name)
+
+        # --- Reachy service commands ("arm on", "arm up", etc.) ---
+        if robot == 'reachy':
+            for pattern, svc_name in _REACHY_SERVICE_RULES:
                 if pattern.match(t):
                     return ParsedCommand('service', '', svc_name,
                                          robot=robot, service=svc_name)
