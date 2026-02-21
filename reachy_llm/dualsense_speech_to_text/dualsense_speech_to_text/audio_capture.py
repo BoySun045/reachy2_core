@@ -11,8 +11,22 @@ WHISPER_SAMPLE_RATE = 16000
 
 
 def find_default_mic() -> int:
-    """Return the default input device index."""
-    return sd.default.device[0] or 0
+    """Return a usable input device index.
+
+    Tries the system default first; if it has no input channels,
+    scans all devices and picks the first one that does.
+    """
+    default_idx = sd.default.device[0]
+    if default_idx is not None:
+        info = sd.query_devices(default_idx)
+        if info['max_input_channels'] >= 1:
+            return int(default_idx)
+
+    for idx, info in enumerate(sd.query_devices()):
+        if info['max_input_channels'] >= 1:
+            return idx
+
+    return 0
 
 
 def _resample(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
