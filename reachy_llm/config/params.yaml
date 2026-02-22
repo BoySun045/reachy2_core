@@ -1,6 +1,6 @@
 speech_to_text:
   ros__parameters:
-    whisper_model: "base"
+    whisper_model: "medium"
     audio_device: -1       # System default mic. Override with device index from `python3 -c "import sounddevice; print(sounddevice.query_devices())"`
     ollama_model: "llama3.2"
     debug_save_wav: true
