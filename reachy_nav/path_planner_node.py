@@ -293,9 +293,10 @@ class PathPlannerNode(Node):
             self.get_logger().warn("No solution found.")
             return
 
-        # Clamp Z & assign orientations
+        # Set Z to odometry height (planning uses Z_PLANE, but publish at robot height)
+        publish_z = float(start_pos[2]) if self._current_pos[robot] is not None else Z_PLANE
         for sol in solution:
-            sol["pos"][2] = Z_PLANE
+            sol["pos"][2] = publish_z
         solution = assign_look_at_orientations(solution, start_yaw, goal_yaw)
 
         self.get_logger().info(f"Solution: {len(solution)} waypoints")

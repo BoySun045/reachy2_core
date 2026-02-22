@@ -21,20 +21,20 @@ from rrt_point3d import PathPlanner
 # ----------------------------
 # Config
 # ----------------------------
-VOXEL_SIZE = 0.10
+VOXEL_SIZE = 0.1
 BOUND_MARGIN = 0.5
 CROP_VERT = None
 
-Z_PLANE = 0.58
 Z_BOUND_EPS = 1e-3
+Z_PLANE_OFFSET = 0.35 # raise sampling plane above ground to avoid ground collision
 
 ENABLE_FLOOR_CUT = False
-FLOOR_CUT = Z_PLANE + 0.03
+FLOOR_CUT_OFFSET = 0.03  # added to Z_PLANE when floor cut is enabled
 
 # Robot geometry
 CYL_Z_REL0 = -1.00
 CYL_Z_REL1 = -1.20
-CYL_RADIUS = 0.25
+CYL_RADIUS = 0.3
 
 RECT_Z_REL0 = 0.10
 RECT_Z_REL1 = -1.00
@@ -47,7 +47,46 @@ VERT_STEP = 0.10
 POLY_VERT_BAND = 0.30
 POLY_MARGIN = 0.00
 
-GRID_STEP = 0.05
+GRID_STEP = 0.1
+
+# ----------------------------
+# Ground plane estimation
+# ----------------------------
+def estimate_ground_z(pcd, bin_size=0.05, gap_threshold=0.15):
+    """Estimate ground-plane Z by 1D height clustering.
+
+    1. Histogram all Z values into small bins.
+    2. Group contiguous non-empty bins into clusters (split when gap > threshold).
+    3. Return the weighted-average Z of the largest cluster (most points).
+    """
+    zs = np.asarray(pcd.points)[:, 2]
+    bins = np.arange(zs.min(), zs.max() + bin_size, bin_size)
+    counts, edges = np.histogram(zs, bins=bins)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    # Keep only non-empty bins
+    nonzero = counts > 0
+    if not np.any(nonzero):
+        raise RuntimeError("Point cloud has no points for ground estimation")
+    nz_centers = centers[nonzero]
+    nz_counts = counts[nonzero]
+
+    # Group contiguous bins into clusters
+    clusters = []
+    cur_c = [nz_centers[0]]
+    cur_w = [nz_counts[0]]
+    for i in range(1, len(nz_centers)):
+        if nz_centers[i] - nz_centers[i - 1] > gap_threshold:
+            clusters.append((cur_c, cur_w))
+            cur_c, cur_w = [], []
+        cur_c.append(nz_centers[i])
+        cur_w.append(nz_counts[i])
+    clusters.append((cur_c, cur_w))
+
+    # Largest cluster by total point count
+    best_c, best_w = max(clusters, key=lambda c: sum(c[1]))
+    ground_z = float(np.average(best_c, weights=best_w))
+    return ground_z
 
 
 # ----------------------------
@@ -122,33 +161,42 @@ def build_robot_poly_slices():
 # ----------------------------
 def main(pcd_path: str):
     # ---- Load TSDF point cloud ----
-    print(f"[1/4] Loading point cloud: {pcd_path}")
+    print(f"[1/5] Loading point cloud: {pcd_path}")
     pcd = o3d.io.read_point_cloud(pcd_path)
     if len(pcd.points) == 0:
         raise RuntimeError(f"Empty point cloud: {pcd_path}")
 
+    # ---- Estimate ground plane height ----
+    print("[2/5] Estimating ground plane height...")
+    z_ground = estimate_ground_z(pcd)
+    z_plane = z_ground + Z_PLANE_OFFSET
+    print(f"  Estimated ground Z: {z_ground:.4f}")
+    print(f"  Sampling plane Z:   {z_plane:.4f}  (ground + {Z_PLANE_OFFSET}m)")
+
+    floor_cut = z_ground + FLOOR_CUT_OFFSET
+
     # ---- Build occupancy voxels ----
-    print("[2/4] Building occupancy voxels...")
+    print("[3/5] Building occupancy voxels...")
     vg, invalid_vx_all, pcd_used = pcd_to_invalid_voxels(
         pcd, VOXEL_SIZE, crop_vert=CROP_VERT
     )
     print(f"  Invalid voxels: {invalid_vx_all.shape[0]}")
 
     if ENABLE_FLOOR_CUT:
-        invalid_vx_all = invalid_vx_all[invalid_vx_all[:, 2] > FLOOR_CUT]
-        print(f"  After floor cut: {invalid_vx_all.shape[0]}")
+        invalid_vx_all = invalid_vx_all[invalid_vx_all[:, 2] > floor_cut]
+        print(f"  After floor cut (z > {floor_cut:.3f}): {invalid_vx_all.shape[0]}")
 
     # ---- Bounds ----
     bound = aabb_to_bound(pcd_used.get_axis_aligned_bounding_box(), BOUND_MARGIN)
-    bound["low_z"] = float(Z_PLANE - Z_BOUND_EPS)
-    bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
+    bound["low_z"] = float(z_plane - Z_BOUND_EPS)
+    bound["high_z"] = float(z_plane + Z_BOUND_EPS)
 
     # ---- Robot geometry ----
     poly_slices, _ = build_robot_poly_slices()
     print(f"  Robot polygon slices: {len(poly_slices)}")
 
     # ---- Set up planner (for collision checking only) ----
-    print("[3/4] Setting up collision checker...")
+    print("[4/5] Setting up collision checker...")
     planner = PathPlanner()
     planner.use_state(use_invx=True)
     planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
@@ -166,8 +214,8 @@ def main(pcd_path: str):
     ys = np.arange(bound["low_y"], bound["high_y"], GRID_STEP)
     total = len(xs) * len(ys)
     print(
-        f"[4/4] Checking {len(xs)} x {len(ys)} = {total} positions "
-        f"(step={GRID_STEP}m)..."
+        f"[5/5] Checking {len(xs)} x {len(ys)} = {total} positions "
+        f"(step={GRID_STEP}m, z_plane={z_plane:.4f})..."
     )
 
     reachable = []
@@ -176,7 +224,7 @@ def main(pcd_path: str):
 
     for i, x in enumerate(xs):
         for y in ys:
-            state = np.array([x, y, Z_PLANE])
+            state = np.array([x, y, z_plane])
             if planner.isStateValid_poly_stack(state):
                 reachable.append(state)
         checked += len(ys)
@@ -195,29 +243,34 @@ def main(pcd_path: str):
         print("No reachable points found. Check robot geometry / margins.")
         return
 
-    # ---- Ground filter: keep only points with +/-Z scene neighbours ----
-    print("Filtering for ground (+/-Z neighbour check)...")
+    # ---- Ground support filter: keep only points with floor beneath ----
+    from scipy.spatial import cKDTree
+
+    ground_tolerance = VOXEL_SIZE * 3.0  # vertical band around z_ground
+    search_radius = VOXEL_SIZE * 2.0
+
     scene_pts = np.asarray(pcd.points)
-    scene_vx = np.round(scene_pts / VOXEL_SIZE).astype(np.int64)
-    scene_vx_set = set(map(tuple, scene_vx))
+    ground_mask_scene = np.abs(scene_pts[:, 2] - z_ground) <= ground_tolerance
+    ground_xy = scene_pts[ground_mask_scene, :2]
 
-    reachable_arr = np.array(reachable)
-    reach_vx = np.round(reachable_arr / VOXEL_SIZE).astype(np.int64)
+    print(f"Ground support filter: {ground_xy.shape[0]} scene points near "
+          f"z_ground={z_ground:.3f} (±{ground_tolerance:.3f}m)")
 
-    z_search = int(round(0.5 / VOXEL_SIZE))
-    offsets_z = range(-z_search, z_search + 1)
+    if ground_xy.shape[0] > 0:
+        tree = cKDTree(ground_xy)
+        reachable_arr = np.array(reachable)
+        dists, _ = tree.query(reachable_arr[:, :2])
+        supported = dists <= search_radius
 
-    ground_mask = np.array([
-        any(tuple(v + [0, 0, dz]) in scene_vx_set for dz in offsets_z if dz != 0)
-        for v in reach_vx
-    ])
-
-    n_before = len(reachable)
-    reachable = list(reachable_arr[ground_mask])
-    print(f"  Ground filter: {len(reachable)} / {n_before} kept")
+        n_before = len(reachable)
+        reachable = list(reachable_arr[supported])
+        print(f"  Ground support: {len(reachable)} / {n_before} kept "
+              f"(radius={search_radius:.3f}m)")
+    else:
+        print("  WARNING: no ground-level scene points found, skipping filter")
 
     if len(reachable) == 0:
-        print("No ground-contact points remain.")
+        print("No ground-supported points remain.")
         return
 
     # ---- Keep only the largest cluster ----
