@@ -615,9 +615,18 @@ class AffordanceInferenceEngine(pl.LightningModule):
         u_index = torch.clamp(
             contact_pix_sample[:, :, 0], 0, patch_width - 1
         )  # [B, 1000]
-        start_pos_d = data_batch["object_depth"][
-            torch.arange(data_batch["object_depth"].size(0))[
-                :, None], v_index, u_index
+        # Fill zero-depth pixels in object_depth with nearest valid neighbor
+        from scipy.ndimage import distance_transform_edt as _edt
+        obj_depth = data_batch["object_depth"]  # [B, H, W]
+        for b in range(batch_size):
+            d_np = obj_depth[b].cpu().numpy()
+            zero_mask = d_np <= 0
+            if zero_mask.any() and not zero_mask.all():
+                _, idx = _edt(zero_mask, return_distances=True, return_indices=True)
+                obj_depth[b] = torch.from_numpy(d_np[idx[0], idx[1]]).to(obj_depth.device)
+
+        start_pos_d = obj_depth[
+            torch.arange(obj_depth.size(0))[:, None], v_index, u_index
         ]  # [B, 1000]
         start_pos_d = start_pos_d.clamp(0.1, 2.0)
         start_pos_d_med = torch.median(start_pos_d, dim=1)[0]  # [B]
@@ -1108,10 +1117,19 @@ class AffordanceInferenceEngine(pl.LightningModule):
                 for k2, v2 in v.items():
                     k2 = f"{k}-{k2}"
                     to_write[k2] = v2.detach().cpu().numpy().astype(np.float32)
+            elif isinstance(v, list):
+                try:
+                    to_write[k] = np.array(v, dtype=np.float32)
+                except ValueError:
+                    # Inhomogeneous shapes — store as object array
+                    arr = np.empty(len(v), dtype=object)
+                    for i, item in enumerate(v):
+                        arr[i] = np.asarray(item, dtype=np.float32) if hasattr(item, '__len__') else item
+                    to_write[k] = arr
             else:
                 print(f"Skipping key {k} of type {type(v)}")
 
-        np.savez_compressed(save_path, **to_write)
+        np.savez_compressed(save_path, **to_write, allow_pickle=True)
 
     @staticmethod
     def load_results(save_path, data_batch):
