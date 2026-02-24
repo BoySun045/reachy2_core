@@ -12,9 +12,9 @@ Action types:
 
 Topics:
   Subscribes:
-    /vidbot/pre_poses   (PoseArray)  — pre-grasp trajectory from vidbot
-    /vidbot/post_poses  (PoseArray)  — post-grasp trajectory from vidbot
-    /vidbot/trigger     (String)     — JSON trigger with object + instruction
+    /spot/vidbot/pre_poses   (PoseArray)  — pre-grasp trajectory from vidbot
+    /spot/vidbot/post_poses  (PoseArray)  — post-grasp trajectory from vidbot
+    /spot/vidbot/trigger     (String)     — JSON trigger with object + instruction
     /tf                              — TF tree for EE pose
 
   Publishes:
@@ -99,12 +99,12 @@ class VidBotSpotManager(Node):
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.create_subscription(
-            PoseArray, "/vidbot/pre_poses", self._pre_cb, 10
+            PoseArray, "/spot/vidbot/pre_poses", self._pre_cb, 10
         )
         self.create_subscription(
-            PoseArray, "/vidbot/post_poses", self._post_cb, 10
+            PoseArray, "/spot/vidbot/post_poses", self._post_cb, 10
         )
-        self.create_subscription(String, "/vidbot/trigger", self._trigger_cb, 10)
+        self.create_subscription(String, "/spot/vidbot/trigger", self._trigger_cb, 10)
 
         self.get_logger().info("VidBot Spot manager ready. Waiting for pre/post poses...")
 

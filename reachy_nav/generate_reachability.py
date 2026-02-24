@@ -26,20 +26,20 @@ BOUND_MARGIN = 0.5
 CROP_VERT = None
 
 Z_BOUND_EPS = 1e-3
-Z_PLANE_OFFSET = 0.35 # raise sampling plane above ground to avoid ground collision
+Z_PLANE_OFFSET = 0.40 # raise sampling plane above ground to avoid ground collision
 
 ENABLE_FLOOR_CUT = False
 FLOOR_CUT_OFFSET = 0.03  # added to Z_PLANE when floor cut is enabled
 
 # Robot geometry
-CYL_Z_REL0 = -1.00
+CYL_Z_REL0 = -1.20
 CYL_Z_REL1 = -1.20
-CYL_RADIUS = 0.35
+CYL_RADIUS = 0.0
 
 RECT_Z_REL0 = 0.10
 RECT_Z_REL1 = -1.00
-RECT_WIDTH_X = 0.30
-RECT_THICK_Y = 0.60
+RECT_WIDTH_X = 1.2
+RECT_THICK_Y = 0.6
 
 TORSO_ABOVE_PLANE = 1.0
 VERT_STEP = 0.10

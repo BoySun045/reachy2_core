@@ -62,11 +62,13 @@ class SpeechToTextNode(Node):
         self._pub = self.create_publisher(String, 'transcription', 10)
         self._cmd_pub = self.create_publisher(String, 'command', 10)
 
-        # Routing publishers (same topics for all robots — robot field in message)
+        # Routing publishers
         self._nav_pub = self.create_publisher(
             String, '/pathplanner_manager/query', 10)
-        self._manip_pub = self.create_publisher(
-            String, '/vidbot/trigger', 10)
+        self._manip_pubs = {
+            'reachy': self.create_publisher(String, '/vidbot/trigger', 10),
+            'spot': self.create_publisher(String, '/spot/vidbot/trigger', 10),
+        }
         self._loco_pub = self.create_publisher(
             String, '/locomotion/command', 10)
 
@@ -223,9 +225,11 @@ class SpeechToTextNode(Node):
                 'object': parsed.object,
                 'instruction': parsed.instruction,
             })
-            self._manip_pub.publish(msg)
+            manip_pub = self._manip_pubs.get(robot, self._manip_pubs['reachy'])
+            manip_pub.publish(msg)
             self.get_logger().info(
                 f'Routed to manipulation: robot={robot}, '
+                f'topic={manip_pub.topic_name}, '
                 f'object="{parsed.object}", '
                 f'instruction="{parsed.instruction}"')
 

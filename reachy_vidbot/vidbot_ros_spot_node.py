@@ -19,13 +19,13 @@ Topics:
     /spot/camera/hand/image          (Image)      — hand RGB
     /spot/depth_registered/hand/image (Image)     — registered depth
     /spot/depth_registered/hand/camera_info (CameraInfo)
-    /vidbot/trigger                   (String)    — JSON trigger
+    /spot/vidbot/trigger               (String)    — JSON trigger
 
   Publishes:
     /spot/arm_pose_commands           (PoseStamped) — arm waypoints
-    /vidbot/pre_trajectory, /vidbot/post_trajectory (Path)
-    /vidbot/pre_poses, /vidbot/post_poses (PoseArray)
-    /vidbot/pre_axes, /vidbot/post_axes (MarkerArray)
+    /spot/vidbot/pre_trajectory, /spot/vidbot/post_trajectory (Path)
+    /spot/vidbot/pre_poses, /spot/vidbot/post_poses (PoseArray)
+    /spot/vidbot/pre_axes, /spot/vidbot/post_axes (MarkerArray)
 
   Service clients:
     /spot/arm_stow, /spot/open_gripper, /spot/close_gripper (Trigger)
@@ -311,39 +311,39 @@ def build_pre_post_spot(pred_cam, loss, R_const, T_base_cam, ee_start):
     return best_idx, float(loss[best_idx]), pre_T, post_T
 
 
+CONDA_ENV = "vidbot"
+CONDA_SETUP = (
+    f'source "$HOME/miniconda3/etc/profile.d/conda.sh" && conda activate {CONDA_ENV}'
+)
+
+
 def run_infer_affordance(obj, action, use_graspnet=False, logger=None):
     scale = get_scale_for_instruction(action) * 3
     scale = min(1 ,scale)
     if logger:
         logger.info(f"Scale for instruction '{action}': {scale}")
-    cmd = [
-        "python3",
-        os.path.join(VDBOT_ROOT, "demos", "infer_affordance.py"),
-        "-d", DATASET_NAME,
-        "-f", FRAME_ID,
-        "-o", obj,
-        "-i", action,
-        "-v",
-        "-s", str(scale),
-    ]
+    py_cmd = (
+        f"python3 {os.path.join(VDBOT_ROOT, 'demos', 'infer_affordance.py')}"
+        f" -d {DATASET_NAME} -f {FRAME_ID}"
+        f" -o '{obj}' -i '{action}' -v -s {scale}"
+    )
     if use_graspnet:
-        cmd.append("--use_graspnet")
+        py_cmd += " --use_graspnet"
 
-    env = os.environ.copy()
-    old_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = VDBOT_ROOT + (":" + old_pp if old_pp else "")
+    bash_cmd = f'{CONDA_SETUP} && PYTHONPATH="{VDBOT_ROOT}:$PYTHONPATH" {py_cmd}'
 
     if logger:
-        logger.info(f"Running: {' '.join(cmd)}")
+        logger.info(f"Running: bash -c '{py_cmd}'")
 
     proc = subprocess.run(
-        cmd, cwd=VDBOT_ROOT, env=env, capture_output=True, text=True,
+        ["bash", "-c", bash_cmd],
+        cwd=VDBOT_ROOT, capture_output=True, text=True,
     )
 
     if proc.returncode != 0:
         raise RuntimeError(
             f"infer_affordance failed.\n"
-            f"CMD: {' '.join(cmd)}\n"
+            f"CMD: {py_cmd}\n"
             f"STDOUT:\n{proc.stdout}\n"
             f"STDERR:\n{proc.stderr}\n"
         )
@@ -475,16 +475,16 @@ class VidBotSpotNode(Node):
         self.create_subscription(Image, color_topic, self._color_cb, 10)
         self.create_subscription(Image, depth_topic, self._depth_cb, 10)
         self.create_subscription(CameraInfo, camera_info_topic, self._camera_info_cb, 10)
-        self.create_subscription(String, "/vidbot/trigger", self._trigger_cb, 10)
+        self.create_subscription(String, "/spot/vidbot/trigger", self._trigger_cb, 10)
 
         # ── Publishers ────────────────────────────────────────────────────
-        self.arm_cmd_pub = self.create_publisher(PoseStamped, "/spot/arm_pose_commands", 10) #/spot/arm_pose_commands
-        self.pre_traj_pub = self.create_publisher(Path, "/vidbot/pre_trajectory", 10)
-        self.post_traj_pub = self.create_publisher(Path, "/vidbot/post_trajectory", 10)
-        self.pre_poses_pub = self.create_publisher(PoseArray, "/vidbot/pre_poses", 10)
-        self.post_poses_pub = self.create_publisher(PoseArray, "/vidbot/post_poses", 10)
-        self.pre_axes_pub = self.create_publisher(MarkerArray, "/vidbot/pre_axes", 10)
-        self.post_axes_pub = self.create_publisher(MarkerArray, "/vidbot/post_axes", 10)
+        self.arm_cmd_pub = self.create_publisher(PoseStamped, "/spot/arm_pose_commands", 10)
+        self.pre_traj_pub = self.create_publisher(Path, "/spot/vidbot/pre_trajectory", 10)
+        self.post_traj_pub = self.create_publisher(Path, "/spot/vidbot/post_trajectory", 10)
+        self.pre_poses_pub = self.create_publisher(PoseArray, "/spot/vidbot/pre_poses", 10)
+        self.post_poses_pub = self.create_publisher(PoseArray, "/spot/vidbot/post_poses", 10)
+        self.pre_axes_pub = self.create_publisher(MarkerArray, "/spot/vidbot/pre_axes", 10)
+        self.post_axes_pub = self.create_publisher(MarkerArray, "/spot/vidbot/post_axes", 10)
 
         # ── Service clients ───────────────────────────────────────────────
         self.stow_client = self.create_client(Trigger, "/spot/arm_stow")
@@ -493,7 +493,7 @@ class VidBotSpotNode(Node):
 
         self.get_logger().info(
             f"VidBot Spot node ready. Subscribed to {color_topic}, {depth_topic}. "
-            "Waiting for /vidbot/trigger ..."
+            "Waiting for /spot/vidbot/trigger ..."
         )
 
     # ── TF helpers ────────────────────────────────────────────────────────

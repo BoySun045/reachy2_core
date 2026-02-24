@@ -58,6 +58,26 @@ class PathPlannerManagerNode(Node):
         self._planning_mode = cfg.get("planning_mode", "collision")
         self.get_logger().info(f"Planning mode: {self._planning_mode}")
 
+        # --- Load target overrides (object name → fixed nav pose) ---
+        self._target_overrides = {}
+        for name, pose in cfg.get("target_overrides", {}).items():
+            pos = pose["position"]
+            ori = pose["orientation"]  # [x, y, z, w]
+            ps = PoseStamped()
+            ps.header.frame_id = FRAME_ID
+            ps.pose.position.x = float(pos[0])
+            ps.pose.position.y = float(pos[1])
+            ps.pose.position.z = float(pos[2])
+            ps.pose.orientation.x = float(ori[0])
+            ps.pose.orientation.y = float(ori[1])
+            ps.pose.orientation.z = float(ori[2])
+            ps.pose.orientation.w = float(ori[3])
+            self._target_overrides[name.lower()] = ps
+            self.get_logger().info(
+                f"Target override: '{name}' → "
+                f"[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]"
+            )
+
         pcd_path = cfg["_pcd_path"]
         reachability_path = cfg["_reachability_path"]
         objects_path = cfg["_objects_path"]
@@ -430,7 +450,21 @@ class PathPlannerManagerNode(Node):
         print(f"  -> Published pose on ~/object_pose")
         print(f"  -> Published bbox on ~/object_bbox")
 
-        goal = self._compute_nav_goal(centroid)
+        # Check for target override (substring match on object name)
+        goal = None
+        obj_name_lower = obj["name"].lower()
+        for override_key, override_pose in self._target_overrides.items():
+            if override_key in obj_name_lower:
+                goal = override_pose
+                goal.header.stamp = self.get_clock().now().to_msg()
+                self.get_logger().info(
+                    f"Using target override for '{override_key}'"
+                )
+                break
+
+        if goal is None:
+            goal = self._compute_nav_goal(centroid)
+
         if goal is not None:
             goal_pub = self._goal_pubs.get(robot)
             if goal_pub is None:

@@ -86,6 +86,7 @@ class PathPlannerNode(Node):
         self._current_yaw = {"reachy": None, "spot": None}
 
         # ---- Build planner (once) ----
+        self._reach_pts = None  # set in reachability mode
         self._planner = PathPlanner()
 
         if mode == "collision":
@@ -192,6 +193,7 @@ class PathPlannerNode(Node):
         # Project reachable points to the planning plane
         reach_pts = np.asarray(pcd_reach.points).copy()
         reach_pts[:, 2] = Z_PLANE
+        self._reach_pts = reach_pts  # stored for nearest-valid snapping
         self.get_logger().info(f"Reachable points: {reach_pts.shape[0]}")
 
         bound = aabb_to_bound(
@@ -201,12 +203,25 @@ class PathPlannerNode(Node):
         bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
 
         self._planner.use_state(use_invx=False)
-        self._planner.update_collision_radius(VOXEL_SIZE * 2.0, 0)
+        self._planner.update_collision_radius(VOXEL_SIZE * 1.0, 0)
         self._planner.update_sp(
             bound, reach_pts, None, input_vx_size=VOXEL_SIZE
         )
         self._planner.use_validity_checker("default")
         self._bound = bound
+
+    # ------------------------------------------------------------------
+    def _snap_to_nearest_valid(self, pos_xyz):
+        """Find the closest reachable point (XY) to the given position.
+
+        Only available in reachability mode. Returns snapped position
+        (with Z_PLANE) or the original position if not in reachability mode.
+        """
+        if self._mode != "reachability" or self._reach_pts is None:
+            return pos_xyz
+        dists = np.linalg.norm(self._reach_pts[:, :2] - pos_xyz[:2], axis=1)
+        nearest = self._reach_pts[np.argmin(dists)]
+        return nearest.copy()
 
     # ------------------------------------------------------------------
     def _check_state_valid(self, state_xyz):
@@ -277,6 +292,14 @@ class PathPlannerNode(Node):
         self.get_logger().info(
             f"Validity: start={start_ok}  goal={goal_ok}"
         )
+
+        if not start_ok and self._mode == "reachability":
+            snapped = self._snap_to_nearest_valid(start_xz)
+            self.get_logger().warn(
+                f"Start outside reachable space, snapping to nearest valid: "
+                f"[{snapped[0]:.3f}, {snapped[1]:.3f}]"
+            )
+            start_xz = snapped
 
         if not start_ok or not goal_ok:
             label = "in collision" if self._mode == "collision" else "outside reachable space"
