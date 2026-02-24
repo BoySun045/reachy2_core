@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Long-running node that exposes /scan_pose and /drop services.
-
-/scan_pose — move Spot arm to scan pose and open gripper.
-/drop      — open gripper to release object, then stow arm.
+Long-running node that exposes a /scan_pose service.
+Call it to move Spot arm to scan pose and open gripper.
 
 Usage:
   python3 spot_scan_pose.py
 
   # From another terminal:
   ros2 service call /scan_pose std_srvs/srv/Trigger
-  ros2 service call /drop std_srvs/srv/Trigger
 """
 import time
 import threading
@@ -27,10 +24,10 @@ class SpotScanPoseNode(Node):
         super().__init__("spot_scan_pose")
 
         self.declare_parameter("arm_cmd_frame", "body")
-        self.declare_parameter("scan_pose_x", 0.25)
+        self.declare_parameter("scan_pose_x", 0.35)
         self.declare_parameter("scan_pose_y", 0.0)
-        self.declare_parameter("scan_pose_z", 0.25)
-        self.declare_parameter("settle_time", 10.0)
+        self.declare_parameter("scan_pose_z", 0.30)
+        self.declare_parameter("settle_time", 2.0)
         self.declare_parameter("gripper_wait", 3.0)
 
         self.arm_cmd_frame = self.get_parameter("arm_cmd_frame").value
@@ -48,7 +45,7 @@ class SpotScanPoseNode(Node):
 
         self.create_service(Trigger, "/scan_pose", self._scan_pose_cb)
         self.create_service(Trigger, "/drop", self._drop_cb)
-        self.get_logger().info("Ready. Services: /scan_pose, /drop")
+        self.get_logger().info("Ready. Call: ros2 service call /scan_pose or /drop std_srvs/srv/Trigger")
 
     def _scan_pose_cb(self, request, response):
         # Run in thread so the service doesn't block the executor
@@ -58,39 +55,6 @@ class SpotScanPoseNode(Node):
         response.success = True
         response.message = "Scan pose reached, gripper open."
         return response
-
-    def _drop_cb(self, request, response):
-        thread = threading.Thread(target=self._execute_drop, daemon=True)
-        thread.start()
-        thread.join()
-        response.success = True
-        response.message = "Gripper opened, arm stowed."
-        return response
-
-    def _execute_drop(self):
-        # Open gripper to release object
-        if self.open_gripper_client.wait_for_service(timeout_sec=5.0):
-            future = self.open_gripper_client.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-            if future.result() and future.result().success:
-                self.get_logger().info("Drop: gripper opened.")
-            else:
-                self.get_logger().error("Drop: failed to open gripper.")
-        else:
-            self.get_logger().error("Drop: open gripper service not available.")
-
-        time.sleep(1.0)
-
-        # Stow arm
-        if self.stow_client.wait_for_service(timeout_sec=5.0):
-            future = self.stow_client.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-            if future.result() and future.result().success:
-                self.get_logger().info("Drop: arm stowed.")
-            else:
-                self.get_logger().error("Drop: failed to stow arm.")
-        else:
-            self.get_logger().error("Drop: arm stow service not available.")
 
     def _execute(self):
         ps = PoseStamped()
@@ -119,6 +83,47 @@ class SpotScanPoseNode(Node):
 
         time.sleep(self.gripper_wait)
         self.get_logger().info("Scan pose ready.")
+
+    def _drop_cb(self, request, response):
+        thread = threading.Thread(target=self._execute_drop, daemon=True)
+        thread.start()
+        thread.join()
+        response.success = True
+        response.message = "Drop pose reached, gripper open."
+        return response
+
+    def _execute_drop(self):
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.frame_id = self.arm_cmd_frame
+        ps.pose.position.x = 0.85
+        ps.pose.position.y = 0.0
+        ps.pose.position.z = 0.1
+        ps.pose.orientation.w = 1.0
+        self.arm_cmd_pub.publish(ps)
+        self.get_logger().info("Sent drop pose: (0.6, 0.0, 0.12). Waiting for settle...")
+        time.sleep(2)
+
+        if self.open_gripper_client.wait_for_service(timeout_sec=5.0):
+            future = self.open_gripper_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            if future.result() and future.result().success:
+                self.get_logger().info("Gripper opened.")
+            else:
+                self.get_logger().error("Failed to open gripper.")
+        else:
+            self.get_logger().error("Open gripper service not available.")
+
+        self.get_logger().info("Drop complete. Stowing arm...")
+        if self.stow_client.wait_for_service(timeout_sec=5.0):
+            future = self.stow_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            if future.result() and future.result().success:
+                self.get_logger().info("Arm stowed.")
+            else:
+                self.get_logger().error("Failed to stow arm.")
+        else:
+            self.get_logger().error("Arm stow service not available.")
 
 
 def main():

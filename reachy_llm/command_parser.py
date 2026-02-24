@@ -50,6 +50,8 @@ _SPOT_SERVICE_RULES = [
     (re.compile(r'^(?:unstow(?:\s+(?:the\s+)?arm)?|deploy\s+(?:the\s+)?arm|bring\s+(?:the\s+)?arm\s+out)$', re.I), 'arm_unstow'),
     (re.compile(r'^open\s+(?:the\s+)?(?:gripper|hand|claw)$', re.I),   'open_gripper'),
     (re.compile(r'^close\s+(?:the\s+)?(?:gripper|hand|claw)$', re.I),  'close_gripper'),
+    (re.compile(r'^(?:scan(?:\s+pose)?|look(?:\s+around)?|ready\s+(?:to\s+)?scan)$', re.I), 'scan_pose'),
+    (re.compile(r'^(?:drop(?:\s+(?:it|that|the\s+object))?|release|let\s+go)$', re.I), 'drop'),
     (re.compile(r'^(?:claim|claim\s+(?:the\s+)?robot)$', re.I),        'claim'),
     (re.compile(r'^(?:power\s+on|power\s+up|boot(?:\s+up)?)$', re.I),  'power_on'),
     (re.compile(r'^(?:power\s+off|shut\s*down)$', re.I),               'power_off'),
@@ -127,7 +129,7 @@ Category rules:
 
 Valid service names for Spot:
   "stand", "sit", "arm_stow", "arm_unstow", "open_gripper", "close_gripper",
-  "claim", "power_on", "power_off", "kill"
+  "scan_pose", "drop", "claim", "power_on", "power_off", "kill"
 
 Valid service names for Reachy:
   "arm_on", "arm_off", "arm_up", "arm_down"
@@ -176,6 +178,12 @@ User: "spot power on"
 
 User: "spot kill"
 {"robot": "spot", "category": "service", "object": "", "instruction": "kill", "service": "kill", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "spot scan"
+{"robot": "spot", "category": "service", "object": "", "instruction": "scan pose", "service": "scan_pose", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+
+User: "spot drop"
+{"robot": "spot", "category": "service", "object": "", "instruction": "drop", "service": "drop", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
 User: "reachy turn on"
 {"robot": "reachy", "category": "service", "object": "", "instruction": "arm on", "service": "arm_on", "dx": 0.0, "dy": 0.0, "dyaw": 0.0}

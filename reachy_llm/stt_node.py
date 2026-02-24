@@ -80,6 +80,11 @@ class SpeechToTextNode(Node):
                          'claim', 'power_on', 'power_off', 'rollover'):
             self._service_clients['spot'][svc_name] = self.create_client(
                 Trigger, f'/spot/{svc_name}')
+        # Spot scan_pose and drop live at /scan_pose and /drop (from spot_scan_pose.py)
+        self._service_clients['spot']['scan_pose'] = self.create_client(
+            Trigger, '/scan_pose')
+        self._service_clients['spot']['drop'] = self.create_client(
+            Trigger, '/drop')
         # Reachy services
         for svc_name in ('arm_on', 'arm_off', 'arm_up', 'arm_down'):
             self._service_clients['reachy'][svc_name] = self.create_client(
@@ -269,6 +274,9 @@ class SpeechToTextNode(Node):
                 # Kill sequence: sit first, then rollover
                 self._call_single_service('spot', 'sit')
                 self._call_single_service('spot', 'rollover')
+            elif robot == 'spot' and service_name == 'drop':
+                # Drop = open gripper + stow arm (via spot_scan_pose.py)
+                self._call_single_service('spot', 'drop')
             else:
                 self._call_single_service(robot, service_name)
         finally:
