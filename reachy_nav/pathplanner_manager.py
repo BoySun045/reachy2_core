@@ -46,7 +46,8 @@ def load_config(config_path: str) -> dict:
     data_dir = os.path.join(config_dir, cfg["data_dir"])
     cfg["_data_dir"] = data_dir
     cfg["_pcd_path"] = os.path.join(data_dir, cfg["pcd_file"])
-    cfg["_reachability_path"] = os.path.join(data_dir, cfg["reachability_file"])
+    cfg["_reachability_path_reachy"] = os.path.join(data_dir, cfg["reachability_file_reachy"])
+    cfg["_reachability_path_spot"] = os.path.join(data_dir, cfg["reachability_file_spot"])
     cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
     return cfg
 
@@ -58,28 +59,37 @@ class PathPlannerManagerNode(Node):
         self._planning_mode = cfg.get("planning_mode", "collision")
         self.get_logger().info(f"Planning mode: {self._planning_mode}")
 
-        # --- Load target overrides (object name → fixed nav pose) ---
+        # Per-robot minimum XY distance from nav goal to object (reachability mode)
+        self._min_dist2goal = {
+            "reachy": float(cfg.get("reachy_min_dist2goal", 0.0)),
+            "spot": float(cfg.get("spot_min_dist2goal", 0.3)),
+        }
+        for robot, d in self._min_dist2goal.items():
+            self.get_logger().info(f"[{robot}] min_dist2goal = {d:.3f} m")
+
+        # --- Load target overrides (per-robot: object name → fixed nav pose) ---
         self._target_overrides = {}
-        for name, pose in cfg.get("target_overrides", {}).items():
-            pos = pose["position"]
-            ori = pose["orientation"]  # [x, y, z, w]
-            ps = PoseStamped()
-            ps.header.frame_id = FRAME_ID
-            ps.pose.position.x = float(pos[0])
-            ps.pose.position.y = float(pos[1])
-            ps.pose.position.z = float(pos[2])
-            ps.pose.orientation.x = float(ori[0])
-            ps.pose.orientation.y = float(ori[1])
-            ps.pose.orientation.z = float(ori[2])
-            ps.pose.orientation.w = float(ori[3])
-            self._target_overrides[name.lower()] = ps
-            self.get_logger().info(
-                f"Target override: '{name}' → "
-                f"[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]"
-            )
+        for robot in ("reachy", "spot"):
+            self._target_overrides[robot] = {}
+            for name, pose in cfg.get(f"target_overrides_{robot}", {}).items():
+                pos = pose["position"]
+                ori = pose["orientation"]  # [x, y, z, w]
+                ps = PoseStamped()
+                ps.header.frame_id = FRAME_ID
+                ps.pose.position.x = float(pos[0])
+                ps.pose.position.y = float(pos[1])
+                ps.pose.position.z = float(pos[2])
+                ps.pose.orientation.x = float(ori[0])
+                ps.pose.orientation.y = float(ori[1])
+                ps.pose.orientation.z = float(ori[2])
+                ps.pose.orientation.w = float(ori[3])
+                self._target_overrides[robot][name.lower()] = ps
+                self.get_logger().info(
+                    f"[{robot}] Target override: '{name}' → "
+                    f"[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]"
+                )
 
         pcd_path = cfg["_pcd_path"]
-        reachability_path = cfg["_reachability_path"]
         objects_path = cfg["_objects_path"]
 
         # --- Load TSDF point cloud ---
@@ -90,13 +100,19 @@ class PathPlannerManagerNode(Node):
         self.get_logger().info(f"Loaded {len(pcd.points)} points")
         self._pcd_msg = self._build_pointcloud2_msg(pcd)
 
-        # --- Load reachability map ---
-        self.get_logger().info(f"Loading reachability from {reachability_path}")
-        pcd_reach = o3d.io.read_point_cloud(reachability_path)
-        self._reachable_pts = np.asarray(pcd_reach.points)
-        self.get_logger().info(
-            f"Loaded {len(self._reachable_pts)} reachable points"
-        )
+        # --- Load per-robot reachability maps ---
+        self._reachable_pts = {}
+        self._reach_pcds = {}
+        for robot, key in [("reachy", "_reachability_path_reachy"),
+                           ("spot", "_reachability_path_spot")]:
+            rpath = cfg[key]
+            self.get_logger().info(f"[{robot}] Loading reachability from {rpath}")
+            pcd_reach = o3d.io.read_point_cloud(rpath)
+            self._reachable_pts[robot] = np.asarray(pcd_reach.points)
+            self._reach_pcds[robot] = pcd_reach
+            self.get_logger().info(
+                f"[{robot}] Loaded {len(self._reachable_pts[robot])} reachable points"
+            )
 
         # --- Load objects ---
         self.get_logger().info(f"Loading objects from {objects_path}")
@@ -128,9 +144,14 @@ class PathPlannerManagerNode(Node):
         self._bbox_pub = self.create_publisher(
             Marker, "~/object_bbox", latched_qos
         )
-        self._reach_pub = self.create_publisher(
-            PointCloud2, "~/reachability", 10
-        )
+        self._reach_pubs = {
+            "reachy": self.create_publisher(
+                PointCloud2, "~/reachability/reachy", 10
+            ),
+            "spot": self.create_publisher(
+                PointCloud2, "~/reachability/spot", 10
+            ),
+        }
 
         # Per-robot nav goal publishers
         self._goal_pubs = {
@@ -142,8 +163,11 @@ class PathPlannerManagerNode(Node):
             ),
         }
 
-        # --- Build reachability PointCloud2 (green) ---
-        self._reach_msg = self._build_pointcloud2_msg(pcd_reach)
+        # --- Build per-robot reachability PointCloud2 messages ---
+        self._reach_msgs = {
+            robot: self._build_pointcloud2_msg(self._reach_pcds[robot])
+            for robot in ("reachy", "spot")
+        }
 
         # --- Timer for point cloud publishing at 0.1 Hz ---
         self.create_timer(10.0, self._publish_pointcloud)
@@ -196,8 +220,9 @@ class PathPlannerManagerNode(Node):
         now = self.get_clock().now().to_msg()
         self._pcd_msg.header.stamp = now
         self._pcd_pub.publish(self._pcd_msg)
-        self._reach_msg.header.stamp = now
-        self._reach_pub.publish(self._reach_msg)
+        for robot in ("reachy", "spot"):
+            self._reach_msgs[robot].header.stamp = now
+            self._reach_pubs[robot].publish(self._reach_msgs[robot])
 
     # ------------------------------------------------------------------
     # Object pose from bounding box
@@ -228,22 +253,30 @@ class PathPlannerManagerNode(Node):
     # ------------------------------------------------------------------
     # Navigation goal from reachability
     # ------------------------------------------------------------------
-    def _compute_nav_goal(self, object_pos):
+    def _compute_nav_goal(self, object_pos, robot: str = "reachy"):
         """Find the closest reachable point to the object, oriented with
         robot X facing the object.  In collision mode, only considers points
         within MAX_ARM_REACH.  Returns PoseStamped or None."""
+        reachable_pts = self._reachable_pts[robot]
         obj_xy = object_pos[:2]
-        dists = np.linalg.norm(self._reachable_pts[:, :2] - obj_xy, axis=1)
+        dists = np.linalg.norm(reachable_pts[:, :2] - obj_xy, axis=1)
 
         if self._planning_mode == "collision":
             within = dists <= MAX_ARM_REACH
             if not np.any(within):
                 return None
             best = np.argmin(dists[within])
-            goal_pt = self._reachable_pts[within][best]
+            goal_pt = reachable_pts[within][best]
         else:
-            best = np.argmin(dists)
-            goal_pt = self._reachable_pts[best]
+            min_d = self._min_dist2goal[robot]
+            far_enough = dists >= min_d
+            if np.any(far_enough):
+                best = np.argmin(dists[far_enough])
+                goal_pt = reachable_pts[far_enough][best]
+            else:
+                # No point meets the minimum distance; fall back to farthest
+                best = np.argmax(dists)
+                goal_pt = reachable_pts[best]
 
         dx = obj_xy[0] - goal_pt[0]
         dy = obj_xy[1] - goal_pt[1]
@@ -453,17 +486,17 @@ class PathPlannerManagerNode(Node):
         # Check for target override (substring match on object name)
         goal = None
         obj_name_lower = obj["name"].lower()
-        for override_key, override_pose in self._target_overrides.items():
+        for override_key, override_pose in self._target_overrides[robot].items():
             if override_key in obj_name_lower:
                 goal = override_pose
                 goal.header.stamp = self.get_clock().now().to_msg()
                 self.get_logger().info(
-                    f"Using target override for '{override_key}'"
+                    f"[{robot}] Using target override for '{override_key}'"
                 )
                 break
 
         if goal is None:
-            goal = self._compute_nav_goal(centroid)
+            goal = self._compute_nav_goal(centroid, robot=robot)
 
         if goal is not None:
             goal_pub = self._goal_pubs.get(robot)

@@ -6,8 +6,8 @@ data_dir: "/home/marwan/marwan_ws/reachy2_core/reachy_nav/data_dso/2026_02_24-13
 
 # Point cloud files (relative to data_dir)
 pcd_file: "tsdf_fused.ply"
-# reachability_file: "reachability_reachy_2.ply"
-reachability_file: "reachability_spot.ply"
+reachability_file_reachy: "reachability_reachy_2.ply"
+reachability_file_spot: "reachability_spot_2.ply"
 objects_file: "object_scene_graph/frame_final_objects.pkl.gz"
 
 # Coordinate frame: set to true if TSDF was generated with --z-up.
@@ -21,22 +21,27 @@ planning_mode: "reachability"
 
 # Override nav goals for specific objects (skips reachability lookup).
 # Keys are matched case-insensitively as substrings of object names.
-# target_overrides:
-#   "light switch":
-#     # position: [0.5598, -0.1304, 0.003]
-#     # orientation: [0.0, 0.0, 0.35464, 0.93500]  # [x, y, z, w] — yaw ~41.5°
-#     position: [0.5472, -0.121, -1.03]
-#     orientation: [0.0011068275524246387, -0.00193383386992288, -0.3376229732154958, -0.941278791419663]  # [x, y, z, w]
-#   "lamp":
-#     position: [0.32322, -2.07188, -1.02061]
-#     orientation: [0.00035, 0.00024, 0.89510, -0.44587]  # [x, y, z, w]
+# Minimum XY distance (metres) from nav goal to object in reachability mode.
+# Ensures the robot stops at least this far from the target object.
+reachy_min_dist2goal: 0.0
+spot_min_dist2goal: 0.8
 
-target_overrides:
-  "light switch_2":
-    # position: [0.5598, -0.1304, 0.003]
-    # orientation: [0.0, 0.0, 0.35464, 0.93500]  # [x, y, z, w] — yaw ~41.5°
+target_overrides_reachy:
+  "light switch":
     position: [0.5472, -0.121, -1.03]
     orientation: [0.0011068275524246387, -0.00193383386992288, -0.3376229732154958, -0.941278791419663]  # [x, y, z, w]
-  "lamp_2":
+  "lamp":
     position: [0.32322, -2.07188, -1.02061]
     orientation: [0.00035, 0.00024, 0.89510, -0.44587]  # [x, y, z, w]
+
+target_overrides_spot:
+  "light switch":
+    position: [0.5472, -0.121, -1.03]
+    orientation: [0.0011068275524246387, -0.00193383386992288, -0.3376229732154958, -0.941278791419663]  # [x, y, z, w]
+  "lamp":
+    position: [0.32322, -2.07188, -1.02061]
+    orientation: [0.00035, 0.00024, 0.89510, -0.44587]  # [x, y, z, w]
+  "toy":
+    # position: [0, -0.69, -1.02061]
+    position: [0.25, -1.5, -1.02061]
+    orientation: [0.0011068275524246387, -0.00193383386992288, -0.3376229732154958, -0.941278791419663]  # [x, y, z, w]

@@ -63,7 +63,8 @@ def load_config(config_path: str) -> dict:
     data_dir = os.path.join(config_dir, cfg["data_dir"])
     cfg["_data_dir"] = data_dir
     cfg["_pcd_path"] = os.path.join(data_dir, cfg["pcd_file"])
-    cfg["_reachability_path"] = os.path.join(data_dir, cfg["reachability_file"])
+    cfg["_reachability_path_reachy"] = os.path.join(data_dir, cfg["reachability_file_reachy"])
+    cfg["_reachability_path_spot"] = os.path.join(data_dir, cfg["reachability_file_spot"])
     cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
     return cfg
 
@@ -85,14 +86,21 @@ class PathPlannerNode(Node):
         self._current_pos = {"reachy": None, "spot": None}
         self._current_yaw = {"reachy": None, "spot": None}
 
-        # ---- Build planner (once) ----
-        self._reach_pts = None  # set in reachability mode
-        self._planner = PathPlanner()
+        # ---- Build planners (per-robot in reachability mode) ----
+        self._reach_pts = {"reachy": None, "spot": None}
 
         if mode == "collision":
-            self._setup_collision_mode(cfg)
+            planner = PathPlanner()
+            self._setup_collision_mode(cfg, planner)
+            # Both robots share the same obstacle planner
+            self._planners = {"reachy": planner, "spot": planner}
         elif mode == "reachability":
-            self._setup_reachability_mode(cfg)
+            self._planners = {}
+            for robot, key in [("reachy", "_reachability_path_reachy"),
+                               ("spot", "_reachability_path_spot")]:
+                planner = PathPlanner()
+                self._setup_reachability_mode(cfg, planner, robot, cfg[key])
+                self._planners[robot] = planner
         else:
             raise ValueError(f"Unknown planning mode: {mode!r}")
 
@@ -142,7 +150,7 @@ class PathPlannerNode(Node):
     # ------------------------------------------------------------------
     # Mode setup helpers
     # ------------------------------------------------------------------
-    def _setup_collision_mode(self, cfg: dict):
+    def _setup_collision_mode(self, cfg: dict, planner: PathPlanner):
         """Obstacle avoidance: PCD → invalid voxels + polygon-stack checker."""
         pcd_path = cfg["_pcd_path"]
         self.get_logger().info(f"[collision] Loading obstacle cloud: {pcd_path}")
@@ -168,24 +176,25 @@ class PathPlannerNode(Node):
         poly_slices, _ = build_robot_poly_slices()
         self.get_logger().info(f"Robot polygon slices: {len(poly_slices)}")
 
-        self._planner.use_state(use_invx=True)
-        self._planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
-        self._planner.update_sp(
+        planner.use_state(use_invx=True)
+        planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
+        planner.update_sp(
             bound, None, invalid_vx_all, input_vx_size=VOXEL_SIZE
         )
-        self._planner.set_robot_polygon_stack(
+        planner.set_robot_polygon_stack(
             slices=poly_slices,
             z_mode="offset",
             z_band=POLY_VERT_BAND,
             margin=POLY_MARGIN,
         )
-        self._planner.use_validity_checker("poly_stack")
-        self._bound = bound
+        planner.use_validity_checker("poly_stack")
 
-    def _setup_reachability_mode(self, cfg: dict):
+    def _setup_reachability_mode(self, cfg: dict, planner: PathPlanner,
+                                robot: str, reach_path: str):
         """Stay-inside-reachable-space: reachability cloud → valid voxels."""
-        reach_path = cfg["_reachability_path"]
-        self.get_logger().info(f"[reachability] Loading reachability cloud: {reach_path}")
+        self.get_logger().info(
+            f"[reachability/{robot}] Loading reachability cloud: {reach_path}"
+        )
         pcd_reach = o3d.io.read_point_cloud(reach_path)
         if len(pcd_reach.points) == 0:
             raise RuntimeError(f"Empty reachability cloud: {reach_path}")
@@ -193,8 +202,10 @@ class PathPlannerNode(Node):
         # Project reachable points to the planning plane
         reach_pts = np.asarray(pcd_reach.points).copy()
         reach_pts[:, 2] = Z_PLANE
-        self._reach_pts = reach_pts  # stored for nearest-valid snapping
-        self.get_logger().info(f"Reachable points: {reach_pts.shape[0]}")
+        self._reach_pts[robot] = reach_pts
+        self.get_logger().info(
+            f"[{robot}] Reachable points: {reach_pts.shape[0]}"
+        )
 
         bound = aabb_to_bound(
             pcd_reach.get_axis_aligned_bounding_box(), BOUND_MARGIN
@@ -202,34 +213,34 @@ class PathPlannerNode(Node):
         bound["low_z"] = float(Z_PLANE - Z_BOUND_EPS)
         bound["high_z"] = float(Z_PLANE + Z_BOUND_EPS)
 
-        self._planner.use_state(use_invx=False)
-        self._planner.update_collision_radius(VOXEL_SIZE * 1.0, 0)
-        self._planner.update_sp(
+        planner.use_state(use_invx=False)
+        planner.update_collision_radius(VOXEL_SIZE * 1.0, 0)
+        planner.update_sp(
             bound, reach_pts, None, input_vx_size=VOXEL_SIZE
         )
-        self._planner.use_validity_checker("default")
-        self._bound = bound
+        planner.use_validity_checker("default")
 
     # ------------------------------------------------------------------
-    def _snap_to_nearest_valid(self, pos_xyz):
+    def _snap_to_nearest_valid(self, pos_xyz, robot: str):
         """Find the closest reachable point (XY) to the given position.
 
         Only available in reachability mode. Returns snapped position
         (with Z_PLANE) or the original position if not in reachability mode.
         """
-        if self._mode != "reachability" or self._reach_pts is None:
+        if self._mode != "reachability" or self._reach_pts[robot] is None:
             return pos_xyz
-        dists = np.linalg.norm(self._reach_pts[:, :2] - pos_xyz[:2], axis=1)
-        nearest = self._reach_pts[np.argmin(dists)]
+        dists = np.linalg.norm(self._reach_pts[robot][:, :2] - pos_xyz[:2], axis=1)
+        nearest = self._reach_pts[robot][np.argmin(dists)]
         return nearest.copy()
 
     # ------------------------------------------------------------------
-    def _check_state_valid(self, state_xyz):
+    def _check_state_valid(self, state_xyz, robot: str):
         """Check validity using the mode-appropriate checker."""
+        planner = self._planners[robot]
         if self._mode == "collision":
-            return self._planner.isStateValid_poly_stack(state_xyz)
+            return planner.isStateValid_poly_stack(state_xyz)
         else:
-            return self._planner.isStateValid(state_xyz)
+            return planner.isStateValid(state_xyz)
 
     # ------------------------------------------------------------------
     def _on_robot_pose(self, msg: Odometry, robot: str):
@@ -287,14 +298,14 @@ class PathPlannerNode(Node):
         start_xz = force_z(start_pos, Z_PLANE)
         goal_xz = force_z(goal_pos, Z_PLANE)
 
-        start_ok = self._check_state_valid(start_xz)
-        goal_ok = self._check_state_valid(goal_xz)
+        start_ok = self._check_state_valid(start_xz, robot)
+        goal_ok = self._check_state_valid(goal_xz, robot)
         self.get_logger().info(
             f"Validity: start={start_ok}  goal={goal_ok}"
         )
 
         if not start_ok and self._mode == "reachability":
-            snapped = self._snap_to_nearest_valid(start_xz)
+            snapped = self._snap_to_nearest_valid(start_xz, robot)
             self.get_logger().warn(
                 f"Start outside reachable space, snapping to nearest valid: "
                 f"[{snapped[0]:.3f}, {snapped[1]:.3f}]"
@@ -305,12 +316,13 @@ class PathPlannerNode(Node):
             label = "in collision" if self._mode == "collision" else "outside reachable space"
             self.get_logger().warn(f"Start or goal is {label}, solving anyway...")
 
+        planner = self._planners[robot]
         start = {"pos": start_xz, "quat": yaw_to_quat(start_yaw)}
         goal = {"pos": goal_xz, "quat": goal_quat}
-        self._planner.update_start_goal(start, goal)
+        planner.update_start_goal(start, goal)
 
-        self._planner.solve(time_limit=TIME_LIMIT, method=METHOD)
-        solution = self._planner.get_solution()
+        planner.solve(time_limit=TIME_LIMIT, method=METHOD)
+        solution = planner.get_solution()
 
         if solution is None or len(solution) == 0:
             self.get_logger().warn("No solution found.")
