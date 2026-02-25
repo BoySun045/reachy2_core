@@ -150,13 +150,13 @@ class ArmOnOffService(Node):
         self._set_torque(L_ARM_JOINTS, True)
         time.sleep(TORQUE_SETTLE_SEC)
         self._set_torque(R_ARM_JOINTS, True)
-        time.sleep(TORQUE_SETTLE_SEC)
-        self._set_gripper(0.0)
-        time.sleep(TORQUE_SETTLE_SEC)
-        self._set_gripper(2.6)
+        # time.sleep(TORQUE_SETTLE_SEC)
+        # self._set_gripper(0.0)
+        # time.sleep(TORQUE_SETTLE_SEC)
+        # self._set_gripper(2.6)
 
         response.success = True
-        response.message = "Both arms ON, grippers warmed up"
+        response.message = "Both arms ON"
         return response
 
     def _on_arm_up(self, _request, response):
