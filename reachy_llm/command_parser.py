@@ -307,7 +307,7 @@ class CommandParser:
         m = _MOVE_DIR_RE.search(t)
         if m:
             direction = m.group(1).lower()
-            dist_val = float(m.group(2)) if m.group(2) else 0.5
+            dist_val = float(m.group(2)) if m.group(2) else 0.2
             unit = (m.group(3) or 'm').lower()
             if unit.startswith('c'):
                 dist_val /= 100.0
