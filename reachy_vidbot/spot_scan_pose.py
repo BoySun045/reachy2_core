@@ -29,7 +29,7 @@ class SpotScanPoseNode(Node):
         self.declare_parameter("arm_cmd_frame", "body")
         self.declare_parameter("scan_pose_x", 0.25)
         self.declare_parameter("scan_pose_y", 0.0)
-        self.declare_parameter("scan_pose_z", 0.25)
+        self.declare_parameter("scan_pose_z", 0.5)
         self.declare_parameter("settle_time", 10.0)
         self.declare_parameter("gripper_wait", 3.0)
 

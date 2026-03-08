@@ -9,6 +9,7 @@ Usage:
     python3 generate_reachability.py <path/to/tsdf_fused.ply>
 """
 
+import multiprocessing
 import os
 import sys
 import time
@@ -22,11 +23,11 @@ from rrt_point3d import PathPlanner
 # Config
 # ----------------------------
 VOXEL_SIZE = 0.1
-BOUND_MARGIN = 0.5
+BOUND_MARGIN = 0
 CROP_VERT = None
 
 Z_BOUND_EPS = 1e-3
-Z_PLANE_OFFSET = 0.40 # raise sampling plane above ground to avoid ground collision
+Z_PLANE_OFFSET = 0.2 # raise sampling plane above ground to avoid ground collision
 
 ENABLE_FLOOR_CUT = False
 FLOOR_CUT_OFFSET = 0.03  # added to Z_PLANE when floor cut is enabled
@@ -36,12 +37,12 @@ CYL_Z_REL0 = -1.20
 CYL_Z_REL1 = -1.20
 CYL_RADIUS = 0.0
 
-RECT_Z_REL0 = 0.10
-RECT_Z_REL1 = -1.00
-RECT_WIDTH_X = 1.2
-RECT_THICK_Y = 0.6
+RECT_Z_REL0 = 0.05   # top of rectangle relative to TORSO_ABOVE_PLANE (m)
+RECT_Z_REL1 = -0.05  # bottom of rectangle relative to TORSO_ABOVE_PLANE (m)
+RECT_WIDTH_X = 1      # rectangle width along X axis (m)
+RECT_THICK_Y = 0.5    # rectangle depth along Y axis (m)
 
-TORSO_ABOVE_PLANE = 1.0
+TORSO_ABOVE_PLANE = 0.3  # robot reference height above the sampling plane (m)
 VERT_STEP = 0.10
 
 POLY_VERT_BAND = 0.30
@@ -49,17 +50,31 @@ POLY_MARGIN = 0.00
 
 GRID_STEP = 0.1
 
+GROUND_RANGE = [-1.2,-1.1]  # Optional [min_z, max_z] to restrict ground search; None = auto-detect
+
+NUM_WORKERS = 12  # Number of CPU cores for parallel sweep; None = use all available cores
+
 # ----------------------------
 # Ground plane estimation
 # ----------------------------
-def estimate_ground_z(pcd, bin_size=0.05, gap_threshold=0.15):
+def estimate_ground_z(pcd, bin_size=0.05, gap_threshold=0.15, ground_range=None):
     """Estimate ground-plane Z by 1D height clustering.
 
     1. Histogram all Z values into small bins.
     2. Group contiguous non-empty bins into clusters (split when gap > threshold).
     3. Return the weighted-average Z of the largest cluster (most points).
+
+    If ground_range is given as [min_z, max_z], only points within that height
+    range are considered for ground estimation.
     """
     zs = np.asarray(pcd.points)[:, 2]
+    if ground_range is not None:
+        mask = (zs >= ground_range[0]) & (zs <= ground_range[1])
+        zs = zs[mask]
+        if len(zs) == 0:
+            raise RuntimeError(
+                f"No points in ground_range [{ground_range[0]}, {ground_range[1]}]"
+            )
     bins = np.arange(zs.min(), zs.max() + bin_size, bin_size)
     counts, edges = np.histogram(zs, bins=bins)
     centers = (edges[:-1] + edges[1:]) / 2.0
@@ -157,18 +172,51 @@ def build_robot_poly_slices():
 
 
 # ----------------------------
+# Multiprocessing worker
+# ----------------------------
+_worker_planner = None
+
+
+def _worker_init(bound, invalid_vx_all, poly_slices):
+    """Initializer for each worker process: creates its own PathPlanner."""
+    global _worker_planner
+    _worker_planner = PathPlanner()
+    _worker_planner.use_state(use_invx=True)
+    _worker_planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
+    _worker_planner.update_sp(bound, None, invalid_vx_all, input_vx_size=VOXEL_SIZE)
+    _worker_planner.set_robot_polygon_stack(
+        slices=poly_slices,
+        z_mode="offset",
+        z_band=POLY_VERT_BAND,
+        margin=POLY_MARGIN,
+    )
+    _worker_planner.use_validity_checker("poly_stack")
+
+
+def _worker_check_row(args):
+    """Check all (x, y, z_plane) for one x value. Returns list of reachable points."""
+    x, ys, z_plane = args
+    result = []
+    for y in ys:
+        state = np.array([x, y, z_plane])
+        if _worker_planner.isStateValid_poly_stack(state):
+            result.append(state)
+    return result
+
+
+# ----------------------------
 # Main
 # ----------------------------
 def main(pcd_path: str):
     # ---- Load TSDF point cloud ----
-    print(f"[1/5] Loading point cloud: {pcd_path}")
+    print(f"[1/4] Loading point cloud: {pcd_path}")
     pcd = o3d.io.read_point_cloud(pcd_path)
     if len(pcd.points) == 0:
         raise RuntimeError(f"Empty point cloud: {pcd_path}")
 
     # ---- Estimate ground plane height ----
-    print("[2/5] Estimating ground plane height...")
-    z_ground = estimate_ground_z(pcd)
+    print("[2/4] Estimating ground plane height...")
+    z_ground = estimate_ground_z(pcd, ground_range=GROUND_RANGE)
     z_plane = z_ground + Z_PLANE_OFFSET
     print(f"  Estimated ground Z: {z_ground:.4f}")
     print(f"  Sampling plane Z:   {z_plane:.4f}  (ground + {Z_PLANE_OFFSET}m)")
@@ -176,7 +224,7 @@ def main(pcd_path: str):
     floor_cut = z_ground + FLOOR_CUT_OFFSET
 
     # ---- Build occupancy voxels ----
-    print("[3/5] Building occupancy voxels...")
+    print("[3/4] Building occupancy voxels...")
     vg, invalid_vx_all, pcd_used = pcd_to_invalid_voxels(
         pcd, VOXEL_SIZE, crop_vert=CROP_VERT
     )
@@ -195,45 +243,35 @@ def main(pcd_path: str):
     poly_slices, _ = build_robot_poly_slices()
     print(f"  Robot polygon slices: {len(poly_slices)}")
 
-    # ---- Set up planner (for collision checking only) ----
-    print("[4/5] Setting up collision checker...")
-    planner = PathPlanner()
-    planner.use_state(use_invx=True)
-    planner.update_collision_radius(0, VOXEL_SIZE * 2.0)
-    planner.update_sp(bound, None, invalid_vx_all, input_vx_size=VOXEL_SIZE)
-    planner.set_robot_polygon_stack(
-        slices=poly_slices,
-        z_mode="offset",
-        z_band=POLY_VERT_BAND,
-        margin=POLY_MARGIN,
-    )
-    planner.use_validity_checker("poly_stack")
-
     # ---- Sample grid on ground plane ----
     xs = np.arange(bound["low_x"], bound["high_x"], GRID_STEP)
     ys = np.arange(bound["low_y"], bound["high_y"], GRID_STEP)
     total = len(xs) * len(ys)
+
+    n_workers = NUM_WORKERS or multiprocessing.cpu_count()
     print(
-        f"[5/5] Checking {len(xs)} x {len(ys)} = {total} positions "
-        f"(step={GRID_STEP}m, z_plane={z_plane:.4f})..."
+        f"[4/4] Checking {len(xs)} x {len(ys)} = {total} positions "
+        f"(step={GRID_STEP}m, z_plane={z_plane:.4f}, workers={n_workers})..."
     )
 
-    reachable = []
-    checked = 0
     t0 = time.time()
+    work_args = [(x, ys, z_plane) for x in xs]
 
-    for i, x in enumerate(xs):
-        for y in ys:
-            state = np.array([x, y, z_plane])
-            if planner.isStateValid_poly_stack(state):
-                reachable.append(state)
-        checked += len(ys)
-        if (i + 1) % 20 == 0 or (i + 1) == len(xs):
-            elapsed = time.time() - t0
-            pct = 100.0 * checked / total
-            print(f"  {pct:5.1f}%  ({checked}/{total})  "
-                  f"reachable so far: {len(reachable)}  "
-                  f"elapsed: {elapsed:.1f}s")
+    with multiprocessing.Pool(
+        processes=n_workers,
+        initializer=_worker_init,
+        initargs=(bound, invalid_vx_all, poly_slices),
+    ) as pool:
+        reachable = []
+        for i, row_result in enumerate(pool.imap(_worker_check_row, work_args)):
+            reachable.extend(row_result)
+            if (i + 1) % 20 == 0 or (i + 1) == len(xs):
+                checked = (i + 1) * len(ys)
+                elapsed = time.time() - t0
+                pct = 100.0 * checked / total
+                print(f"  {pct:5.1f}%  ({checked}/{total})  "
+                      f"reachable so far: {len(reachable)}  "
+                      f"elapsed: {elapsed:.1f}s")
 
     dt = time.time() - t0
     print(f"\nDone: {len(reachable)} reachable / {total} total "
@@ -246,8 +284,8 @@ def main(pcd_path: str):
     # ---- Ground support filter: keep only points with floor beneath ----
     from scipy.spatial import cKDTree
 
-    ground_tolerance = VOXEL_SIZE * 3.0  # vertical band around z_ground
-    search_radius = VOXEL_SIZE * 2.0
+    ground_tolerance = VOXEL_SIZE * 2.0  # vertical band around z_ground
+    search_radius = VOXEL_SIZE * 3.0
 
     scene_pts = np.asarray(pcd.points)
     ground_mask_scene = np.abs(scene_pts[:, 2] - z_ground) <= ground_tolerance
@@ -273,15 +311,6 @@ def main(pcd_path: str):
         print("No ground-supported points remain.")
         return
 
-    # ---- Keep only the largest cluster ----
-    pcd_tmp = o3d.geometry.PointCloud()
-    pcd_tmp.points = o3d.utility.Vector3dVector(np.array(reachable))
-    labels = np.array(pcd_tmp.cluster_dbscan(eps=GRID_STEP * 2, min_points=3))
-    if labels.max() >= 0:
-        largest = np.argmax(np.bincount(labels[labels >= 0]))
-        reachable = [r for r, l in zip(reachable, labels) if l == largest]
-        print(f"  Largest cluster: {len(reachable)} pts (of {int((labels >= 0).sum())} clustered, {int((labels == -1).sum())} noise)")
-
     # ---- Save ----
     pcd_reach = o3d.geometry.PointCloud()
     pcd_reach.points = o3d.utility.Vector3dVector(np.array(reachable))
@@ -290,6 +319,15 @@ def main(pcd_path: str):
     out_path = os.path.join(os.path.dirname(pcd_path), "reachability.ply")
     o3d.io.write_point_cloud(out_path, pcd_reach)
     print(f"Saved to {out_path}")
+
+    # ---- Save ground plane ----
+    pcd_ground = o3d.geometry.PointCloud()
+    ground_pts_3d = scene_pts[ground_mask_scene]
+    pcd_ground.points = o3d.utility.Vector3dVector(ground_pts_3d)
+    pcd_ground.paint_uniform_color([0.0, 0.0, 1.0])
+    ground_path = os.path.join(os.path.dirname(pcd_path), "ground.ply")
+    o3d.io.write_point_cloud(ground_path, pcd_ground)
+    print(f"Saved to {ground_path}")
 
     # ---- Visualize ----
     pcd_scene = o3d.io.read_point_cloud(pcd_path)

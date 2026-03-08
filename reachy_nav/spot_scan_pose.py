@@ -24,11 +24,11 @@ class SpotScanPoseNode(Node):
         super().__init__("spot_scan_pose")
 
         self.declare_parameter("arm_cmd_frame", "body")
-        self.declare_parameter("scan_pose_x", 0.35)
+        self.declare_parameter("scan_pose_x", 0.4)
         self.declare_parameter("scan_pose_y", 0.0)
-        self.declare_parameter("scan_pose_z", 0.30)
-        self.declare_parameter("settle_time", 2.0)
-        self.declare_parameter("gripper_wait", 3.0)
+        self.declare_parameter("scan_pose_z", 0.7)
+        self.declare_parameter("settle_time", 0.5)
+        self.declare_parameter("gripper_wait", 0.5)
 
         self.arm_cmd_frame = self.get_parameter("arm_cmd_frame").value
         self.scan_pose = np.array([

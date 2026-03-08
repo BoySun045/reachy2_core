@@ -48,7 +48,10 @@ def load_config(config_path: str) -> dict:
     cfg["_pcd_path"] = os.path.join(data_dir, cfg["pcd_file"])
     cfg["_reachability_path_reachy"] = os.path.join(data_dir, cfg["reachability_file_reachy"])
     cfg["_reachability_path_spot"] = os.path.join(data_dir, cfg["reachability_file_spot"])
-    cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
+    if cfg.get("objects_file"):
+        cfg["_objects_path"] = os.path.join(data_dir, cfg["objects_file"])
+    else:
+        cfg["_objects_path"] = None
     return cfg
 
 
@@ -114,21 +117,24 @@ class PathPlannerManagerNode(Node):
                 f"[{robot}] Loaded {len(self._reachable_pts[robot])} reachable points"
             )
 
-        # --- Load objects ---
-        self.get_logger().info(f"Loading objects from {objects_path}")
-        with gzip.open(objects_path, "rb") as f:
-            data = pickle.load(f)
-        self._objects = data["objects"]
-        if cfg.get("z_up", False):
-            # Convert bboxes from Y-up to Z-up: (x, y, z) -> (x, z, -y)
-            for obj in self._objects:
-                bbox = np.array(obj["bbox_np"], dtype=np.float64)
-                y = bbox[:, 1].copy()
-                bbox[:, 1] = bbox[:, 2]
-                bbox[:, 2] = -y
-                obj["bbox_np"] = bbox
-            self.get_logger().info("Object bboxes converted to Z-up")
-        self.get_logger().info(f"Loaded {len(self._objects)} objects")
+        # --- Load objects (optional) ---
+        self._objects = []
+        if objects_path and os.path.exists(objects_path):
+            self.get_logger().info(f"Loading objects from {objects_path}")
+            with gzip.open(objects_path, "rb") as f:
+                data = pickle.load(f)
+            self._objects = data["objects"]
+            if cfg.get("z_up", False):
+                for obj in self._objects:
+                    bbox = np.array(obj["bbox_np"], dtype=np.float64)
+                    y = bbox[:, 1].copy()
+                    bbox[:, 1] = bbox[:, 2]
+                    bbox[:, 2] = -y
+                    obj["bbox_np"] = bbox
+                self.get_logger().info("Object bboxes converted to Z-up")
+            self.get_logger().info(f"Loaded {len(self._objects)} objects")
+        else:
+            self.get_logger().info("No objects file configured, skipping object loading")
 
         # --- Publishers ---
         self._pcd_pub = self.create_publisher(

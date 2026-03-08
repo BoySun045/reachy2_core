@@ -2,14 +2,12 @@
 # Paths are relative to this config file's directory.
 
 # Data directory containing point clouds, poses, objects, etc.
-data_dir: "/home/marwan/marwan_ws/reachy2_core/reachy_nav/data_dso/2026_02_24-13_10_34-sfm_map_dso"
+data_dir: "/home/marwan/marwan_ws/Mix_Reality_Project/data/test_7"
 
 # Point cloud files (relative to data_dir)
 pcd_file: "tsdf_fused.ply"
-reachability_file_reachy: "reachability_reachy_2.ply"
-reachability_file_spot: "reachability_spot_2.ply"
-objects_file: "object_scene_graph/frame_final_objects.pkl.gz"
-
+reachability_file_reachy: "reachability.ply"
+reachability_file_spot: "reachability_2.ply"
 # Coordinate frame: set to true if TSDF was generated with --z-up.
 # When true, object bboxes are converted from Y-up to Z-up to match.
 z_up: false
