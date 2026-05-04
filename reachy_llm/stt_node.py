@@ -125,6 +125,13 @@ class SpeechToTextNode(Node):
         energy = self._audio.current_energy
         now = time.monotonic()
 
+        # Debug: print energy every ~1s (every 50th call at 50Hz)
+        if not hasattr(self, '_dbg_count'):
+            self._dbg_count = 0
+        self._dbg_count += 1
+        if self._dbg_count % 50 == 0:
+            self.get_logger().info(f'[DBG] energy={energy:.6f}  threshold={self._energy_threshold}')
+
         if self._state == _IDLE:
             if energy > self._energy_threshold:
                 # Speech onset detected

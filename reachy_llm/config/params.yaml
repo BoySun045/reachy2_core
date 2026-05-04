@@ -1,7 +1,7 @@
 speech_to_text:
   ros__parameters:
     whisper_model: "medium"
-    audio_device: -1       # System default mic. Override with device index from `python3 -c "import sounddevice; print(sounddevice.query_devices())"`
+    audio_device: 4        # USB Microphone: Audio (hw:1,0)
     ollama_model: "llama3.2"
     debug_save_wav: true
     energy_threshold: 0.01   # RMS energy threshold for speech detection
